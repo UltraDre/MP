@@ -445,6 +445,8 @@ const StreamEngine = {
     const hls = new window.Hls({
       enableWorker: true,
       lowLatencyMode: true,
+      // Begin fetching immediately and keep a generous forward buffer to reduce stalls.
+      autoStartLoad: true,
       backBufferLength: 90,
       maxBufferLength: 60,
       manifestLoadingTimeOut: 15000,
@@ -521,7 +523,13 @@ const StreamEngine = {
     this.dash = player;
     player.updateSettings({
       streaming: {
-        buffer: { fastSwitchEnabled: true },
+        buffer: {
+          fastSwitchEnabled: true,
+          // Keep more media ahead than dash.js's short default buffer target.
+          bufferTimeDefault: 30,
+          bufferTimeAtTopQuality: 60,
+          bufferTimeAtTopQualityLongForm: 90,
+        },
         retryAttempts: { MPD: 4, MediaSegment: 4 },
       },
     });
@@ -786,9 +794,14 @@ const Player = {
     const type = item.type || detectType(item.url, 'progressive');
     const src = item.objectUrl || item.url;
 
-    // Reset + preload hint so the browser starts fetching immediately.
+    // Ask the browser to fetch ahead for progressive, native HLS, and DASH sources.
+    // MSE-based HLS/DASH also use their own forward-buffer targets below.
+    v.preload = 'auto';
+
+    // Reset so the browser starts fetching the new source immediately.
     v.removeAttribute('src');
     v.innerHTML = '';               // drop previous <track> children
+    $('#seek').style.setProperty('--buffered', '0%');
     Subtitles.onSourceChanged();
     try { v.load(); } catch { /* noop */ }
 
@@ -824,7 +837,6 @@ const Player = {
       try { v.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
       v.removeAttribute('crossorigin');
       v.src = src;
-      v.preload = 'auto';
       UI.setBadge(item.kind === 'file' ? 'LOCAL' : (item.kind === 'offline' ? 'OFFLINE' : 'FILE'));
       v.addEventListener('loadedmetadata', applyResume, { once: true });
       // Progressive files: try a CORS blob fallback, then a clear error.
@@ -1069,13 +1081,19 @@ const Controls = {
       $('#timeCurrent').textContent = fmtTime(v.currentTime);
       seek.setAttribute('aria-valuetext', `${fmtTime(v.currentTime)} of ${fmtTime(dur)}`);
     }
-    // Buffered portion (last buffered range is the most useful indicator)
+    // Draw the furthest buffered point behind the played portion of the seek bar.
+    // Always write a value so switching sources (or an empty TimeRanges list)
+    // cannot leave the previous video's buffered indicator on screen.
+    let bufferedPct = 0;
     try {
-      if (v.buffered.length && dur) {
-        const end = v.buffered.end(v.buffered.length - 1);
-        seek.style.setProperty('--buffered', `${(end / dur) * 100}%`);
+      const ranges = v.buffered;
+      if (dur > 0 && ranges.length) {
+        let bufferedEnd = 0;
+        for (let i = 0; i < ranges.length; i++) bufferedEnd = Math.max(bufferedEnd, ranges.end(i));
+        bufferedPct = clamp((bufferedEnd / dur) * 100, 0, 100);
       }
     } catch { /* buffered can throw on some browsers */ }
+    seek.style.setProperty('--buffered', `${bufferedPct}%`);
   },
 
   renderDuration() {

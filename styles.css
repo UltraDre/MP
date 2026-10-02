@@ -552,10 +552,15 @@ input[type="range"].volume::-webkit-slider-runnable-track {
   height: 6px; border-radius: 999px;
   background:
     linear-gradient(to right, var(--accent) 0 var(--progress, 0%), transparent var(--progress, 0%)) ,
-    linear-gradient(to right, rgba(255, 255, 255, .34) 0 var(--buffered, 0%), transparent var(--buffered, 0%)),
+    linear-gradient(to right, rgba(255, 255, 255, .48) 0 var(--buffered, 0%), transparent var(--buffered, 0%)),
     var(--surface-3);
 }
-input[type="range"].seek::-moz-range-track,
+input[type="range"].seek::-moz-range-track {
+  height: 6px; border-radius: 999px;
+  background:
+    linear-gradient(to right, rgba(255, 255, 255, .48) 0 var(--buffered, 0%), transparent var(--buffered, 0%)),
+    var(--surface-3);
+}
 input[type="range"].volume::-moz-range-track { height: 6px; border-radius: 999px; background: var(--surface-3); }
 input[type="range"].seek::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--accent); }
 input[type="range"].volume::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--accent-2); }

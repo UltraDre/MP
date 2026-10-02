@@ -106,6 +106,7 @@ check('speed grid populated (10 options)', document.querySelectorAll('#speedGrid
   String(document.querySelectorAll('#speedGrid button').length));
 check('theme applied to <html>', ['dark', 'light'].includes(document.documentElement.dataset.theme));
 check('PiP hidden in jsdom (unsupported)', $('#btnPip').hidden === true);
+check('video requests eager preloading by default', $('#video').preload === 'auto', $('#video').preload);
 check('empty state visible on first run', $('#emptyState').hidden === false);
 check('movie search replaced the scan-site controls', $('#btnEmptySearch') !== null && $('#btnSearchMovies') !== null
   && $('#btnEmptyScan') === null && $('#btnScanSite') === null);
@@ -235,6 +236,27 @@ check('volume swipe shows the new percentage', $('#gestureHudLabel').textContent
 swipe(200, 90, 200, 150);
 check('swipe down lowers volume', Math.abs(video.volume - 0.3) < 0.01, String(video.volume));
 
+console.log('\n— buffered range —');
+let bufferedEnd = 120;
+Object.defineProperty(video, 'buffered', {
+  configurable: true,
+  get() {
+    return bufferedEnd === null
+      ? { length: 0 }
+      : { length: 1, start: () => 0, end: () => bufferedEnd };
+  },
+});
+video._duration = 200;
+video.dispatchEvent(new window.Event('progress'));
+await wait(280);
+check('seek bar shows the loaded range at 60 percent', $('#seek').style.getPropertyValue('--buffered') === '60%',
+  $('#seek').style.getPropertyValue('--buffered'));
+bufferedEnd = null;
+video.dispatchEvent(new window.Event('progress'));
+await wait(280);
+check('buffer indicator clears when no media is buffered', $('#seek').style.getPropertyValue('--buffered') === '0%',
+  $('#seek').style.getPropertyValue('--buffered'));
+
 console.log('\n— playlist —');
 const urlInput = $('#urlInput');
 function submitUrl(u) {
@@ -242,8 +264,10 @@ function submitUrl(u) {
   $('#urlForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 }
 window.Hls = { isSupported: () => false };   // simulate a browser without MSE
+video.preload = 'metadata';                 // Player.load should opt stream sources back into auto-buffering
 submitUrl('https://cdn.example.com/movies/sample.m3u8');
 await wait(60);
+check('online stream switches the video back to eager preloading', video.preload === 'auto', video.preload);
 check('playlist has 1 item after URL submit', document.querySelectorAll('#playlistList .item').length === 1,
   String(document.querySelectorAll('#playlistList .item').length));
 await wait(300); // playlists saves are debounced

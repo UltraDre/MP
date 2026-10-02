@@ -34,10 +34,12 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 **Playback**
 
-- Play/pause, seek bar with hover tooltip + buffered range, volume/mute, fullscreen, picture-in-picture,
+- Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute, fullscreen, picture-in-picture,
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
+- Online progressive, HLS and DASH sources automatically request ahead buffering to help reduce stalls
+  (within browser, source and network limits).
 - Media Session integration (lock-screen / hardware media keys where supported).
-- Loading spinner, buffered-range indicator, resume position, friendly error cards with retry.
+- Loading spinner, resume position, friendly error cards with retry.
 
 **Sources**
 
