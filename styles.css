@@ -685,6 +685,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 .url-form { display: grid; gap: 8px; margin-top: 10px; }
 .url-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .url-actions .btn { flex: 1 1 auto; }
+.scan-site-button { width: 100%; margin-top: 8px; justify-content: center; }
 
 .drop-zone {
   display: grid; place-items: center; gap: 6px;

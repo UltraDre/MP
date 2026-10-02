@@ -1025,7 +1025,7 @@ const Controls = {
 
     /* --- empty state quick actions --- */
     $('#btnEmptyLocal').addEventListener('click', (e) => { e.stopPropagation(); $('#fileInput').click(); });
-    $('#btnEmptyDemo').addEventListener('click', (e) => { e.stopPropagation(); Sources.loadSample(); });
+    $('#btnEmptyScan').addEventListener('click', (e) => { e.stopPropagation(); Sources.scanWebsite(); });
 
     /* --- fullscreen state --- */
     document.addEventListener('fullscreenchange', () => {
@@ -2408,7 +2408,7 @@ const Sources = {
       this.loadFromInput({ play: true });
     });
     $('#btnQueueUrl').addEventListener('click', (e) => { e.preventDefault(); this.loadFromInput({ play: false }); });
-    $('#btnDemoUrl').addEventListener('click', () => this.loadSample());
+    $('#btnScanSite').addEventListener('click', () => this.scanWebsite());
 
     /* Local files */
     $('#btnAddLocal').addEventListener('click', () => $('#fileInput').click());
@@ -2609,6 +2609,30 @@ const Sources = {
       Toast.ok(`${items.length} file${items.length === 1 ? '' : 's'} added${play ? '' : ' to playlist'}`);
       Shell.closePanel();
     });
+  },
+
+  /** Scan the URL field as a web page, even when its path looks like a media file. */
+  scanWebsite() {
+    const input = $('#urlInput');
+    let value = input.value.trim();
+    if (!value) {
+      // On small screens the URL field may be hidden in the panel. Open it so
+      // the user can paste a website before trying again.
+      Shell.openPanel();
+      input.focus();
+      Toast.warn('Paste a website URL first');
+      return;
+    }
+
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+      value = (/^(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})/i.test(value) ? 'http://' : 'https://') + value;
+    }
+    input.value = value;
+    let parsed;
+    try { parsed = new URL(value); } catch { Toast.err('That does not look like a valid website URL'); return; }
+    if (!/^https?:$/.test(parsed.protocol)) { Toast.err('Only http(s) websites can be scanned'); return; }
+
+    this.scanPageForVideos(value, { play: true });
   },
 
   loadSample() {

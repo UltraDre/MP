@@ -147,7 +147,7 @@ The file is split into numbered sections so you can jump straight to what you ne
 ### 1. Play an online video
 
 1. Paste the URL into **Online video** and press **Play** (or **Queue** to add it without playing).
-2. Press **Sample** to cycle through a few public test streams (needs internet).
+2. Paste a website URL and press **Scan site for videos** to find video files referenced by that page.
 3. Formats are detected from the URL. Progressive MP4/WebM files play without CORS.
    HLS/DASH playlists need CORS — see [Limitations](#limitations--known-constraints).
 4. Links that are **not** direct media files (ordinary web pages) are scanned automatically:
