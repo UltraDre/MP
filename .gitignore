@@ -1,0 +1,10 @@
+# Dev-only dependencies for the optional test harnesses
+node_modules/
+package-lock.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
