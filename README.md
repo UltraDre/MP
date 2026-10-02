@@ -36,10 +36,16 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 - Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute, fullscreen, picture-in-picture,
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
-- Online progressive, HLS and DASH sources automatically request ahead buffering to help reduce stalls
-  (within browser, source and network limits).
+- Online progressive, HLS and DASH sources request ahead buffering to help reduce stalls. **Pausing does
+  not stop the download**: while playback is paused the forward-buffer targets are raised so the stream
+  keeps filling ahead (up to the browser/SourceBuffer quota and the host's limits), and hls.js is nudged
+  if it stops growing. The *Keep downloading ahead while paused* switch in the shortcut dialog can turn
+  the background data usage off.
 - Media Session integration (lock-screen / hardware media keys where supported).
-- Loading spinner, resume position, friendly error cards with retry.
+- Loading spinner, friendly error cards with retry, and **resume positions**: every item remembers where
+  you stopped and re-opens there (a title you watched to the end starts over). Marks are keyed by the
+  media URL in `localStorage`, so they survive reloads, playlist re-imports and switching between the
+  streaming and downloaded copy of the same video; local files keep theirs for the session.
 
 **Sources**
 
@@ -51,9 +57,14 @@ No frameworks, no build step, no bundler — open it from any static server and 
     automatically (`<video>`/`<source>` tags, `og:video` metadata, media links
     and URLs embedded in the page's scripts) and every video found is added
     to the playlist
-- **Movie search**: search Internet Archive by title for direct video files whose records declare a
-  public-domain or Creative Commons license. Results can be played or queued. This is a focused catalog
-  search, not a search of the whole web; license claims come from uploaders and should be verified.
+- **Movie & series search**: look a title up in several catalogues of openly licensed video at once —
+  **Internet Archive** (public-domain / CC movie records), **Wikimedia Commons** (free media, direct
+  `upload.wikimedia.org` files) and the federated **PeerTube** network via SepiaSearch (resolved to the
+  instance's own MP4/HLS URL). The *Catalogue* picker narrows the search to a single source. Results can
+  be played or queued. Only records with an uploader-declared public-domain / Creative Commons licence and
+  a directly playable file are listed — this is not a search of commercial streaming services or the whole
+  web, and the licence claims come from uploaders, so open the record and verify the rights before
+  streaming.
 - **Local**: file picker, folder picker (sidecar `.vtt`/`.srt` subtitles are matched by filename),
   drag-and-drop onto the page, plus `Ctrl/Cmd+V` to paste a URL from the clipboard.
 - **Offline**: one click stores the current video (or every HLS/DASH segment) in the browser cache so it
@@ -64,6 +75,8 @@ No frameworks, no build step, no bundler — open it from any static server and 
 - Add online URLs and local files, switch between items, reorder (drag-and-drop or ↑/↓ buttons),
   remove items, clear the list, import/export as JSON. The playlist survives reloads (local files are
   intentionally not persisted — browsers do not allow it — but they stay available for the session).
+- Selecting an item always resumes the position where you last stopped watching it, including after a
+  reload of the app.
 
 **Subtitles**
 
@@ -140,7 +153,7 @@ The file is split into numbered sections so you can jump straight to what you ne
 |---|---------|----------------|
 | 01–04 | Utilities, Settings, Toasts, Media helpers | formatting, localStorage, dialogs, format detection |
 | 05 | `StreamEngine` | loads hls.js/dash.js on demand and attaches streams |
-| 06 | `Player` | the core playback controller (`load()`, seeking, volume, errors) |
+| 06 | `Player` + `Resume` | the core playback controller (`load()`, seeking, volume, errors) and the persistent resume-position store |
 | 07 | `MediaSession` | OS media keys / lock-screen metadata |
 | 08–09 | `Controls`, `Menus` | control bar binding, speed menu, popups |
 | 10–11 | `Gestures`, `Keyboard` | double-tap/double-click gestures & shortcuts |
@@ -148,7 +161,7 @@ The file is split into numbered sections so you can jump straight to what you ne
 | 13 | `Offline` | talking to the service worker, downloads UI |
 | 14 | `Subtitles` | VTT/SRT tracks, delay, embedded tracks |
 | 15 | `SubtitleSearch` | online search (OpenSubtitles/Stremio), `Net` fetch helper, proxies |
-| 16 | `Sources`, `MovieSearch` | URL/local files, page scanning and Internet Archive movie search |
+| 16 | `Sources`, `MovieSearch` | URL/local files, page scanning and the movie/series catalogues (Internet Archive, Wikimedia Commons, PeerTube) |
 | 17–18 | `Theme`, `Shell` | theme, network state, panels, dialogs, install |
 | 19–20 | `UI`, `App` | view helpers and boot sequence |
 
@@ -159,11 +172,14 @@ The file is split into numbered sections so you can jump straight to what you ne
 ### 1. Play an online video
 
 1. Paste a direct media URL into **Online video** and press **Play** (or **Queue** to add it without playing).
-2. To look up a movie by name, choose **Search movies**, enter its title, then press **Play** on a result
-   (or **Queue** it). This searches Internet Archive's movie catalog for items marked public domain or
-   Creative Commons and offering a direct video file. It does **not** search the whole internet or
-   third-party subscription services. License labels are supplied by uploaders; open the record to
-   verify rights before streaming.
+2. To look up a movie, series or episode by name, choose **Search movies**, enter its title and press
+   **Play** on a result (or **Queue** it). The search runs against every catalogue selected in the
+   **Catalogue** picker — Internet Archive, Wikimedia Commons and the federated PeerTube network — and
+   only lists items with an uploader-declared public-domain/Creative Commons licence and a direct video
+   file or stream. It does **not** search the whole internet, commercial streaming services or paid
+   offers; licence labels are supplied by uploaders, so open the record and verify rights before
+   streaming. Wikimedia Commons videos are usually WebM/Ogg (browser codec support varies) and PeerTube
+   items are served from the hosting instance, so the first connection can take a moment.
 3. Formats are detected from the URL. Progressive MP4/WebM files play without CORS.
    HLS/DASH playlists need CORS — see [Limitations](#limitations--known-constraints).
 4. Links that are **not** direct media files (ordinary web pages) are scanned automatically when
@@ -194,6 +210,10 @@ You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
 Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or drag the row) to reorder,
 ✕ to remove, the header buttons to import/export/clear. **Export** writes a JSON file you can share;
 **Import** merges a JSON playlist back in.
+
+Clicking an item re-opens it **where you left off** (a “Resumed at …” toast confirms the position). That
+works for streamed, downloaded and local files, across app reloads, and a title that was watched to the
+end starts from the beginning next time. Playing a fifth of a video or longer is what creates the mark.
 
 ### 5. Subtitles — local files and online search
 
@@ -345,6 +365,21 @@ dash → vendor/dash.all.min.js → cdn.jsdelivr.net/npm/dashjs@5.2.1 → cdn.da
 
 To upgrade, replace the two files (or delete them and let the CDN versions load).
 
+### Buffer policy while playing and paused
+
+`StreamEngine.BUFFER_TARGETS` holds two sets of forward-buffer targets:
+
+| State | hls.js | dash.js |
+|-------|--------|---------|
+| playing | `maxBufferLength: 60s`, `maxMaxBufferLength: 900s`, `maxBufferSize: 60 MB` | `bufferTimeDefault: 30s`, `bufferTimeAtTopQuality: 60s`, `bufferTimeAtTopQualityLongForm: 90s` |
+| paused | `maxBufferLength: 300s`, `maxMaxBufferLength: 3600s`, `maxBufferSize: 300 MB` | `bufferTimeDefault: 300s`, `bufferTimeAtTopQuality: 600s`, `bufferTimeAtTopQualityLongForm: 900s` |
+
+`applyBufferPolicy()` re-applies these on every play/pause (hls.js re-reads `hls.config`, dash.js gets a
+runtime `updateSettings()`), so a paused video keeps downloading ahead. hls.js can have stopped its
+scheduling loop after filling the old target, so a small keep-alive (every 2.5 s, max 6 nudges) calls
+`hls.startLoad()` whenever the buffered end has not moved for ~5 s. Browsers will still stop a
+progressive MP4/WebM download at their own internal limit — that part is not scriptable.
+
 ---
 
 ## Browser support
@@ -373,9 +408,10 @@ These are inherent to a browser-based player (no backend, no DRM):
    **page scan** still need `Access-Control-Allow-Origin`. Downloading cross-origin without CORS
    falls back to an opaque cache entry with limited seeking. Watch pages (YouTube, Vimeo, social)
    are not direct files, and their hosts block cross-origin reads, so the page scan cannot
-   extract their videos either — paste a direct file/stream URL. Movie-title search uses Internet
-   Archive's public catalog APIs only; it does not search commercial streaming services or the whole web.
-   Its license labels are uploader-provided and are not independently verified.
+   extract their videos either — paste a direct file/stream URL. Movie/series search queries the public
+   APIs of Internet Archive, Wikimedia Commons and SepiaSearch (the PeerTube index); it does not search
+   commercial streaming services, torrent sites or the whole web. Licence labels are uploader-provided
+   and are not independently verified.
 2. **DRM / EME** — Widevine/PlayReady/FairPlay protected streams are not supported.
 3. **Live streams** — HLS/DASH live playlists can be played but not downloaded (there is no end).
 4. **DASH coverage** — `SegmentTemplate`, `SegmentTimeline`, `SegmentList` and `BaseURL` chains are
@@ -401,6 +437,14 @@ These are inherent to a browser-based player (no backend, no DRM):
 13. **OpenSubtitles legacy results** are downloaded from the Stremio mirror (plain UTF-8 `.srt`) with
     the original `.gz` file as a fallback; browsers without `DecompressionStream` cannot unpack the
     fallback, so those users should use the ⤓ save button and open the file manually.
+14. **Buffering ahead is best-effort** — browsers cap how much media they keep for a `<video>` element
+    and SourceBuffers have their own quota, so “download the rest of the film in the background” cannot
+    be guaranteed for progressive files. Streams (HLS/DASH) get much larger targets while paused; live
+    streams keep their normal live window. Background buffering uses bandwidth, hence the switch in the
+    shortcut dialog.
+15. **Resume positions live in this browser** (`localStorage`, max 300 entries/6 months, pruned
+    automatically). Clearing site data or using private windows starts everything from the beginning.
+    A title you watched to within ~2 % of its end (at least 5 s, at most 30 s) is treated as finished.
 
 ---
 
@@ -417,8 +461,11 @@ These are inherent to a browser-based player (no backend, no DRM):
 | Playback stutters for 4K files | The browser decodes in software; try a lower resolution or close other tabs. |
 | Nothing is stored after a while | The browser evicted the cache (storage pressure). Grant persistent storage when prompted and keep free disk space. |
 | Subtitles do not appear | Enable them in the CC panel; check the file is a valid `.vtt`/`.srt` (SRT is converted automatically). |
-| Movie search finds nothing | The search covers Internet Archive's movie catalog, not commercial streaming services or the whole web. Try the title's original spelling, or browse the Archive record for alternative names. Only records with a declared Creative Commons/public-domain license and a direct video file are shown. |
-| Movie search cannot connect | Check the connection and retry. The search reads Internet Archive's public JSON APIs directly; browser extensions or network filters may block those requests. |
+| Movie search finds nothing | The search covers Internet Archive, Wikimedia Commons and PeerTube — not commercial streaming services, torrent sites or the whole web. Try the title's original spelling (or just the series name), switch the *Catalogue* picker to *All catalogues*, or browse a record for alternative names. Only records with a declared Creative Commons/public-domain licence and a direct video file are shown — a title whose upload has no licence or no playable file is skipped on purpose. |
+| Movie search cannot connect | Check the connection and retry; the status line names which catalogue failed. The search reads the catalogues' public JSON APIs directly, so browser extensions, DNS filters or offline mode can block individual sources — the others still deliver results. |
+| A search returns “PeerTube … could not be reached” | Some PeerTube instances are offline or block cross-origin reads. PeerTube rows need one extra request (the instance's API) to find the direct file; simply retry, or narrow the picker to another catalogue. |
+| Video starts again from the beginning instead of resuming | The video is shorter than 5 s, it was watched to the end (then starting over is intentional), it is a live stream, or the site data was cleared. Local files only keep their position for the current session. |
+| Nothing is downloaded while the video is paused | Progressive MP4/WebM playback is buffered by the browser itself, which stops after its own internal limit regardless of the page. HLS/DASH streams are expanded while paused — check *Keep downloading ahead while paused* is on (shortcut dialog) and that the host is not rate-limiting. |
 | Online subtitle search finds nothing | The name must match a release on OpenSubtitles — try a shorter title, clear the language filter or switch it to *Any language*. The status line names the source that failed and why. |
 | Search says “blocked by CORS” | The host refused the browser request. Enable **Retry blocked requests** in *More options* (uses a public proxy), or paste a direct subtitle link / load the file manually. |
 | OpenSubtitles.com (API key) returns “API key rejected” | The key is wrong or rate-limited. Remove it from *More options* to fall back to the free sources. |
@@ -429,10 +476,40 @@ These are inherent to a browser-based player (no backend, no DRM):
 
 - **Theme** — all colours live in the `:root` / `:root[data-theme="light"]` custom properties at the top
   of `styles.css` (`--accent`, `--accent-2`, surfaces, radii, spacing).
-- **Default settings** — edit the `Settings.data` defaults in `script.js` §02.
+- **Default settings** — edit the `Settings.data` defaults in `script.js` §02
+  (`prebufferWhilePaused`, `movieSearchSource`, …).
+- **Buffer policy** — `StreamEngine.BUFFER_TARGETS` (see
+  [Streaming libraries](#streaming-libraries-hlsjs--dashjs)).
 - **Speed presets** — the `speeds` array in `Menus.init()`.
 - **Sample streams** — `Sources.SAMPLES`.
 - **Cache version** — bump `VERSION` in `service-worker.js` to invalidate the app shell after changes.
+
+### Adding a search catalogue
+
+The movie/series search is provider-based: every entry in `MovieSearch.sources` is an object of the shape
+
+```js
+{
+  id: 'archive',                       // value used by the picker and stored in settings
+  label: 'Internet Archive',           // shown in the picker and on every result row
+  async search(query, { signal }) {    // → array of result objects (may be empty)
+    return [{
+      title: 'Some Film', year: '1929', creator: 'Studio',
+      license: { url: 'https://creativecommons.org/…', label: 'CC BY · uploader-declared' },
+      url: 'https://example.org/film.mp4',   // direct file or stream URL
+      type: detectType(url, 'progressive'),
+      fileName: 'film.mp4', fileSize: 0, duration: 0,
+      detailsUrl: 'https://example.org/record/1',
+    }];
+  },
+}
+```
+
+Push it into `MovieSearch.sources` and the picker, the status line and the source tags pick it up
+automatically. Follow the same licence rules as the built-in catalogues: only surface records with an
+uploader-declared public-domain/Creative Commons licence *and* a directly playable URL, use `credentials:
+'omit'` + `referrerPolicy: 'no-referrer'` for the requests (see `MovieNet`), and never scrape a watch
+page or bypass a paywall/DRM.
 
 ### Service worker updates
 
@@ -459,9 +536,11 @@ node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/g
   a fake network and fake clients. It verifies HLS/DASH URL collection, byte accounting, range
   responses (`206` + `Content-Range`), aliasing, cancellation and cache cleanup.
 - `ui-smoke.test.mjs` boots `index.html` + `script.js` in jsdom with media-element stubs and exercises
-  shortcuts, gestures (including the touch double-tap timing), playlist reordering, movie search
-  (with mocked Internet Archive search/metadata and license filtering), subtitles, the online subtitle
-  search (with a mocked OpenSubtitles/Stremio backend, language filters and one-click loading) and
+  shortcuts, gestures (including the touch double-tap timing), playlist reordering, movie/series search
+  (mocked Internet Archive, Wikimedia Commons and SepiaSearch/PeerTube backends, licence filtering,
+  direct-URL resolution and the catalogue picker), subtitles, the online subtitle search (with a mocked
+  OpenSubtitles/Stremio backend, language filters and one-click loading), resume-position persistence
+  across item switches and the paused forward-buffer policy (through a fake hls.js instance) plus
   localStorage persistence.
 
 ---
@@ -470,7 +549,13 @@ node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/g
 
 - [hls.js](https://github.com/video-dev/hls.js) — HLS playback (Apache-2.0)
 - [dash.js](https://github.com/Dash-Industry-Forum/dash.js) — MPEG-DASH playback (BSD-3-Clause)
-- Movie title search uses Internet Archive's public [Advanced Search](https://archive.org/developers/search.html) and [Metadata](https://archive.org/developers/md-read.html) APIs. Movie files and item metadata remain hosted by their uploaders / the Archive.
+- Movie/series search uses Internet Archive's public [Advanced Search](https://archive.org/developers/search.html)
+  and [Metadata](https://archive.org/developers/md-read.html) APIs, the
+  [Wikimedia Commons MediaWiki API](https://commons.wikimedia.org/w/api.php) (direct files are served by
+  [`upload.wikimedia.org`](https://upload.wikimedia.org)) and the
+  [SepiaSearch](https://sepiasearch.org) index of the federated [PeerTube](https://joinpeertube.org)
+  network (each result is then resolved against its hosting instance's API). Video files and metadata
+  remain hosted by their uploaders / the respective platforms.
 - Sample streams referenced in the app belong to their respective owners (W3C, Google, Apple, DASH-IF).
 - Online subtitle search talks to third-party services: [OpenSubtitles](https://www.opensubtitles.org)
   (legacy REST API and the official [opensubtitles.com](https://www.opensubtitles.com) API),

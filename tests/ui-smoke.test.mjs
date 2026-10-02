@@ -496,6 +496,109 @@ check('queued movie uses the direct encoded Internet Archive video URL', movieQu
   JSON.stringify(movieQueue.map((item) => ({ title: item.title, url: item.url, type: item.type }))));
 $('#btnMovieSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 
+// Multi-catalogue search: Commons + PeerTube rows carry their own source tag
+// and their direct file URLs, and the catalogue picker narrows the queries.
+const comboCalls = [];
+window.fetch = async (url) => {
+  const requestUrl = String(url);
+  comboCalls.push(requestUrl);
+  if (requestUrl.startsWith('https://archive.org/advancedsearch.php?')) {
+    return { ok: true, json: async () => ({ response: { docs: [] } }) };
+  }
+  if (requestUrl.startsWith('https://commons.wikimedia.org/w/api.php?')) {
+    return {
+      ok: true,
+      json: async () => ({
+        query: {
+          pages: {
+            1: {
+              pageid: 1, ns: 6, title: 'File:Open Film.webm',
+              imageinfo: [{
+                url: 'https://upload.wikimedia.org/wikipedia/commons/a/ab/Open_Film.webm?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original',
+                descriptionurl: 'https://commons.wikimedia.org/wiki/File:Open_Film.webm',
+                size: 1048576, mime: 'video/webm', duration: 321.5, user: 'Example',
+                extmetadata: {
+                  LicenseShortName: { value: 'CC BY-SA 4.0' },
+                  LicenseUrl: { value: 'https://creativecommons.org/licenses/by-sa/4.0' },
+                  Artist: { value: 'Some <b>Artist</b>' },
+                  DateTimeOriginal: { value: '2019-04-02' },
+                },
+              }],
+            },
+          },
+        },
+      }),
+    };
+  }
+  if (requestUrl.startsWith('https://sepiasearch.org/api/v1/search/videos?')) {
+    return {
+      ok: true,
+      json: async () => ({
+        data: [{
+          uuid: 'abc-123', name: 'Federated Feature', url: 'https://tube.example.org/videos/watch/abc-123',
+          publishedAt: '2021-06-01T10:00:00.000Z', duration: 600, isLive: false, privacy: { id: 1 },
+          licence: { id: 2, label: 'Attribution - Share Alike' }, channel: { displayName: 'Open Channel' },
+          account: { host: 'tube.example.org' },
+        }],
+      }),
+    };
+  }
+  if (requestUrl === 'https://tube.example.org/api/v1/videos/abc-123') {
+    return {
+      ok: true,
+      json: async () => ({
+        privacy: { id: 1 }, licence: { id: 2, label: 'Attribution - Share Alike' },
+        name: 'Federated Feature', duration: 600, publishedAt: '2021-06-01T10:00:00.000Z',
+        url: 'https://tube.example.org/videos/watch/abc-123', channel: { displayName: 'Open Channel' },
+        files: [
+          { resolution: { id: 480 }, fileUrl: 'https://tube.example.org/static/web-videos/abc-123-480.mp4', size: 1000, hasVideo: true },
+          { resolution: { id: 1080 }, fileUrl: 'https://tube.example.org/static/web-videos/abc-123-1080.mp4', size: 5000, hasVideo: true },
+        ],
+        streamingPlaylists: [],
+      }),
+    };
+  }
+  return { ok: false, status: 404, json: async () => ({}) };
+};
+$('#movieSearchSource').value = 'all';
+$('#movieSearchSource').dispatchEvent(new window.Event('change', { bubbles: true }));
+urlInput.value = 'Open Feature';
+$('#movieSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(150);
+const comboRows = [...document.querySelectorAll('#movieSearchResults .movie-result')];
+check('every selected catalogue is searched and listed together', comboRows.length === 2, String(comboRows.length));
+check('Commons results are tagged and linked to the direct upload URL',
+  /Wikimedia Commons/.test($('#movieSearchResults').textContent)
+  && $('#movieSearchResults a[href="https://upload.wikimedia.org/wikipedia/commons/a/ab/Open_Film.webm"]') !== null,
+  $('#movieSearchResults').textContent.slice(0, 220));
+check('PeerTube results resolve to the instance’s own best-quality MP4',
+  /PeerTube · tube\.example\.org/.test($('#movieSearchResults').textContent)
+  && $('#movieSearchResults a[href="https://tube.example.org/static/web-videos/abc-123-1080.mp4"]') !== null,
+  $('#movieSearchResults').textContent.slice(0, 220));
+check('Commons uploader licences are shown', /CC BY-SA 4.0/.test($('#movieSearchResults').textContent));
+check('HTML in Commons metadata is flattened',
+  /Some Artist/.test($('#movieSearchResults').textContent) && !/<b>/.test($('#movieSearchResults').textContent));
+check('the Commons duration/size are listed', /5:21/.test($('#movieSearchResults').textContent)
+  && /1\.0 MB/.test($('#movieSearchResults').textContent), $('#movieSearchResults').textContent.slice(0, 220));
+
+const callsBeforeFilter = comboCalls.length;
+$('#movieSearchSource').value = 'commons';
+$('#movieSearchSource').dispatchEvent(new window.Event('change', { bubbles: true }));
+await wait(150);
+const filteredCalls = comboCalls.slice(callsBeforeFilter);
+check('picking one catalogue queries only that catalogue',
+  filteredCalls.some((url) => url.includes('commons.wikimedia.org'))
+  && !filteredCalls.some((url) => url.includes('archive.org') || url.includes('sepiasearch.org')),
+  JSON.stringify(filteredCalls));
+check('the filtered list only holds Commons rows',
+  document.querySelectorAll('#movieSearchResults .movie-result').length === 1
+  && /Wikimedia Commons/.test($('#movieSearchResults').textContent),
+  $('#movieSearchResults').textContent.slice(0, 180));
+$('#movieSearchSource').value = 'all';
+$('#movieSearchSource').dispatchEvent(new window.Event('change', { bubbles: true }));
+await wait(150);
+$('#btnMovieSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
 console.log('\n— page scanning —');
 window.fetch = async (url) => ({
   ok: true,
@@ -569,6 +672,87 @@ const settingsRaw = window.localStorage.getItem('nebula.settings.v1');
 const playlistRaw = window.localStorage.getItem('nebula.playlist.v1');
 check('settings object contains all keys', ['theme', 'volume', 'speed', 'loopMode', 'shuffle', 'captionsEnabled'].every((k) => k in JSON.parse(settingsRaw)),
   settingsRaw);
+
+console.log('\n— resume positions —');
+const resumeItem = 'https://cdn.example.com/resume-me.mp4';
+submitUrl(resumeItem);
+await wait(80);
+video._duration = 600;
+video.dispatchEvent(new window.Event('play'));   // mark the item as watched
+video.currentTime = 240;
+video.dispatchEvent(new window.Event('pause'));
+await wait(500);                                 // position writes are debounced
+const resumeRaw = JSON.parse(window.localStorage.getItem('nebula.resume.v1')) || { items: {} };
+const storedMark = resumeRaw.items[`url:${resumeItem}`] || {};
+check('pausing stores the position keyed by the media URL',
+  Math.abs(storedMark.t - 240) < 0.01, JSON.stringify(resumeRaw.items).slice(0, 220));
+check('the stored mark also carries the duration and a timestamp',
+  Math.abs(storedMark.d - 600) < 0.01 && storedMark.at > 0, JSON.stringify(storedMark));
+
+submitUrl('https://cdn.example.com/something-else.mp4');
+await wait(80);
+submitUrl(resumeItem);
+await wait(80);
+video.dispatchEvent(new window.Event('loadedmetadata'));
+check('re-opening the item resumes where it stopped', Math.abs(video.currentTime - 240) < 0.01, String(video.currentTime));
+
+video._duration = 600;
+video.currentTime = 598;
+video.dispatchEvent(new window.Event('pause'));
+await wait(500);
+const afterFinish = JSON.parse(window.localStorage.getItem('nebula.resume.v1')) || { items: {} };
+check('watching an item to the end clears its resume mark', !(`url:${resumeItem}` in afterFinish.items),
+  JSON.stringify(afterFinish.items).slice(0, 220));
+
+console.log('\n— buffering ahead while paused —');
+const hlsConfigs = [];
+let hlsKicks = 0;
+window.Hls = class FakeHls {
+  constructor(config) {
+    this.config = config;
+    this.handlers = {};
+    this.levels = [{}];        // as if the manifest had already been parsed
+    hlsConfigs.push(config);
+  }
+  static isSupported() { return true; }
+  on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); }
+  once(evt, fn) { this.on(evt, fn); }
+  emit(evt, data) { (this.handlers[evt] || []).slice().forEach((fn) => fn({ type: evt }, data)); }
+  loadSource(url) { this.url = url; }
+  attachMedia(el) { this.media = el; setTimeout(() => this.emit('manifest_parsed', { levels: [{}, {}] }), 0); }
+  startLoad() { hlsKicks += 1; }
+  destroy() {}
+  get mainForwardBufferInfo() { return { len: 10, end: 12 }; }
+};
+window.Hls.Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'manifest_parsed', LEVEL_LOADED: 'level_loaded' };
+window.Hls.ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError' };
+
+submitUrl('https://cdn.example.com/stream/keeps-loading.m3u8');
+await wait(150);
+const hlsConfig = hlsConfigs[0] || {};
+check('an attached hls stream starts with the lean forward buffer', hlsConfig.maxBufferLength === 60,
+  String(hlsConfig.maxBufferLength));
+
+video.dispatchEvent(new window.Event('pause'));
+check('pausing expands the hls forward buffer so it keeps downloading ahead',
+  hlsConfig.maxBufferLength === 300 && hlsConfig.maxMaxBufferLength === 3600 && hlsConfig.maxBufferSize === 300e6,
+  JSON.stringify({ maxBufferLength: hlsConfig.maxBufferLength, maxBufferSize: hlsConfig.maxBufferSize }));
+check('pausing nudges hls to keep loading', hlsKicks >= 1, String(hlsKicks));
+
+video.dispatchEvent(new window.Event('play'));
+check('resuming drops back to the lean window', hlsConfig.maxBufferLength === 60, String(hlsConfig.maxBufferLength));
+
+/* The option turns the paused expansion off without touching normal playback. */
+$('#optPrebuffer').checked = false;
+$('#optPrebuffer').dispatchEvent(new window.Event('change', { bubbles: true }));
+video.dispatchEvent(new window.Event('pause'));
+check('the option can disable the paused expansion', hlsConfig.maxBufferLength === 60, String(hlsConfig.maxBufferLength));
+$('#optPrebuffer').checked = true;
+$('#optPrebuffer').dispatchEvent(new window.Event('change', { bubbles: true }));
+video.dispatchEvent(new window.Event('play'));   // stops the keep-alive timer
+await wait(300);                                 // settings writes are debounced
+check('the option is stored in settings',
+  JSON.parse(window.localStorage.getItem('nebula.settings.v1')).prebufferWhilePaused === true);
 
 console.log('\n— errors —');
 const realErrors = logs.errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom|Could not load script|resource/i.test(e));

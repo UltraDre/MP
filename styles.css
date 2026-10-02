@@ -702,10 +702,14 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 .search-extra .field { margin-top: 4px; }
 
 /* Movie search results are restricted to direct files with an explicit
-   public-domain / Creative Commons license claim in Internet Archive. */
+   public-domain / Creative Commons license claim, gathered from several
+   open video catalogues (Internet Archive, Wikimedia Commons, PeerTube). */
 .movie-search { width: min(700px, calc(100vw - 32px)); }
 .movie-search-body { display: grid; gap: 12px; }
 .movie-search-note { margin: 0; font-size: .8rem; color: var(--text-dim); line-height: 1.5; }
+.movie-search-filter { justify-content: flex-end; font-size: .78rem; color: var(--text-dim); flex-wrap: wrap; }
+.movie-search-filter label { font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.movie-search-filter select { flex: 0 1 auto; width: auto; min-width: 12rem; }
 .movie-results { display: grid; gap: 8px; margin: 0; max-height: 48dvh; overflow: auto; }
 .movie-results:empty { display: none; }
 .movie-result {
@@ -722,6 +726,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 }
 .movie-result-meta .tag.license { color: var(--ok); text-decoration: none; }
 .movie-result-meta .tag.license:hover { border-color: var(--ok); }
+.movie-result-meta .tag.source { color: var(--accent-2); border-color: var(--accent-soft); background: var(--accent-soft); }
 .movie-result-link { color: var(--accent-2); text-decoration: underline; text-underline-offset: 2px; }
 .movie-result-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .movie-result-actions .btn { padding: 7px 10px; font-size: .8rem; }

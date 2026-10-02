@@ -14,7 +14,7 @@
  *   03 UI helpers         09 Menus       | 10 Gestures
  *   04 Media helpers      11 Keyboard    | 12 Playlist
  *   05 StreamEngine       13 Offline     | 14 Subtitles
- *   06 Player             15 SubtitleSearch
+ *   06 Player + Resume    15 SubtitleSearch
  *   16 Sources + MovieSearch | 17 Theme | 18 Shell | 19 UI | 20 Boot
  * ===================================================================== */
 
@@ -204,6 +204,8 @@ const Settings = {
     captionsEnabled: true,  // do we auto-show available subtitle tracks?
     subtitleDelay: 0,
     seekZones: false,       // double-tap left/right third = ±10s (opt-in)
+    prebufferWhilePaused: true, // keep downloading ahead while playback is paused
+    movieSearchSource: 'all',   // movie search catalogue: 'all' | provider id
     lastVolume: 1,
     subSearchLang: '',      // preferred language for the online subtitle search
     subSearchProxy: true,   // retry blocked (CORS) subtitle requests through a proxy
@@ -360,6 +362,126 @@ const StreamEngine = {
   _promises: {},
   hls: null,
   dash: null,
+  media: null,          // the <video> the active stream is attached to
+  paused: false,        // is playback currently paused?
+
+  /* Forward-buffer targets for the streaming libraries. Browsers and
+     SourceBuffers impose their own hard limits, but the libraries stop
+     requesting well before that unless told otherwise — and they used to stop
+     at ~1 minute. While playback is paused the targets are pushed up so the
+     stream keeps downloading ahead (that is what makes "pause, wander off,
+     come back, keep watching" instant); on resume they drop back to a lean
+     window so we do not hoard memory while watching. */
+  BUFFER_TARGETS: {
+    playing: {
+      hls: { maxBufferLength: 60, maxMaxBufferLength: 900, maxBufferSize: 60e6 },
+      dash: { bufferTimeDefault: 30, bufferTimeAtTopQuality: 60, bufferTimeAtTopQualityLongForm: 90 },
+    },
+    paused: {
+      hls: { maxBufferLength: 300, maxMaxBufferLength: 3600, maxBufferSize: 300e6 },
+      dash: { bufferTimeDefault: 300, bufferTimeAtTopQuality: 600, bufferTimeAtTopQualityLongForm: 900 },
+    },
+  },
+  _keepTimer: null,
+  _keepEnd: -1,
+  _keepTicks: 0,
+  _keepNudges: 0,
+
+  /**
+   * (Re)apply the forward-buffer policy to the active stream. Called whenever
+   * playback starts or pauses, when the preference changes, and when a
+   * streaming library has just been attached.
+   */
+  applyBufferPolicy({ kick = false } = {}) {
+    const ahead = this.paused && Settings.get('prebufferWhilePaused') !== false;
+    const targets = ahead ? this.BUFFER_TARGETS.paused : this.BUFFER_TARGETS.playing;
+
+    if (this.hls) {
+      // hls.js re-reads these values on every scheduling pass, so a runtime
+      // change takes effect without re-attaching the stream.
+      try { Object.assign(this.hls.config, targets.hls); } catch (err) { console.warn('[stream] buffer targets', err); }
+      if (ahead) {
+        this._startKeepAlive();
+        // The stream controller may have stopped ticking once it filled the
+        // old (smaller) target — restart it so it fills the new one.
+        if (kick || this.hls.mainForwardBufferInfo == null) this._nudgeLoading();
+      } else this._stopKeepAlive();
+    }
+
+    if (this.dash) {
+      try { this.dash.updateSettings({ streaming: { buffer: Object.assign({}, targets.dash) } }); }
+      catch (err) { console.warn('[stream] buffer targets', err); }
+      // dash.js keeps its scheduler running while paused (scheduleWhilePaused),
+      // so the new targets are picked up on the next pass.
+      if (ahead) this._startKeepAlive();
+      else this._stopKeepAlive();
+    }
+
+    if (!this.hls && !this.dash) this._stopKeepAlive();
+    return targets;
+  },
+
+  /** Remember whether playback is paused (raises/restores the buffer targets). */
+  setPaused(paused) {
+    this.paused = !!paused;
+    return this.applyBufferPolicy({ kick: true });
+  },
+
+  /* ---- paused keep-alive: nudge the loader if the buffer stops growing ---- */
+
+  _startKeepAlive() {
+    if (this._keepTimer) return;
+    this._keepEnd = this._bufferEnd();
+    this._keepTicks = 0;
+    this._keepNudges = 0;
+    this._keepTimer = setInterval(() => this._keepAliveTick(), 2500);
+  },
+
+  _stopKeepAlive() {
+    if (this._keepTimer) clearInterval(this._keepTimer);
+    this._keepTimer = null;
+    this._keepTicks = 0;
+    this._keepNudges = 0;
+  },
+
+  /** Furthest buffered second known right now (hls.js first, then the element). */
+  _bufferEnd() {
+    if (this.hls) {
+      const info = this.hls.mainForwardBufferInfo;
+      if (info && Number.isFinite(info.end)) return info.end;
+    }
+    try {
+      const ranges = this.media && this.media.buffered;
+      if (ranges && ranges.length) return ranges.end(ranges.length - 1);
+    } catch { /* buffered can throw on some browsers */ }
+    return -1;
+  },
+
+  _keepAliveTick() {
+    if (!this.paused || (!this.hls && !this.dash)) { this._stopKeepAlive(); return; }
+    const end = this._bufferEnd();
+    if (end < 0) return;                    // nothing buffered yet — the loader is still starting
+    const duration = this.media && Number.isFinite(this.media.duration) ? this.media.duration : 0;
+    if (duration && end >= duration - 1) { this._stopKeepAlive(); return; }   // everything is here
+    if (end > this._keepEnd + 0.1) {        // still downloading ahead — carry on
+      this._keepEnd = end;
+      this._keepTicks = 0;
+      this._keepNudges = 0;
+      return;
+    }
+    this._keepTicks += 1;
+    if (this._keepTicks < 2) return;        // ~5 s without progress
+    this._keepTicks = 0;
+    this._keepNudges += 1;
+    if (this._keepNudges > 6) { this._stopKeepAlive(); return; } // the source cannot give more
+    this._nudgeLoading();
+  },
+
+  /** Ask hls.js to resume fetching from where it stopped. */
+  _nudgeLoading() {
+    if (!this.hls || !this.hls.levels) return;   // loadSource() kicks things off before that
+    try { this.hls.startLoad(); } catch (err) { console.warn('[stream] startLoad', err); }
+  },
 
   /** Load a <script> once, resolving to true/false. */
   _loadScript(src, timeout = 12000) {
@@ -400,6 +522,8 @@ const StreamEngine = {
 
   /** Tear down any previous streaming instance. */
   destroy() {
+    this._stopKeepAlive();
+    this.media = null;
     if (this.hls) {
       try { this.hls.destroy(); } catch (err) { console.warn(err); }
       this.hls = null;
@@ -416,6 +540,7 @@ const StreamEngine = {
    */
   async attach(video, url, type, handlers = {}) {
     this.destroy();
+    this.media = video;
     if (type === 'hls') return this._attachHls(video, url, handlers);
     if (type === 'dash') return this._attachDash(video, url, handlers);
     return { ok: false, mode: 'none', error: 'Not a streaming type' };
@@ -447,6 +572,7 @@ const StreamEngine = {
       lowLatencyMode: true,
       // Begin fetching immediately and keep a generous forward buffer to reduce stalls.
       autoStartLoad: true,
+      startFragPrefetch: true,
       backBufferLength: 90,
       maxBufferLength: 60,
       manifestLoadingTimeOut: 15000,
@@ -467,6 +593,8 @@ const StreamEngine = {
       },
     });
     this.hls = hls;
+    // Extend (or trim) the forward-buffer targets to match the current state.
+    this.applyBufferPolicy();
 
     hls.on(window.Hls.Events.ERROR, (_evt, data) => {
       if (!data.fatal) {
@@ -525,7 +653,8 @@ const StreamEngine = {
       streaming: {
         buffer: {
           fastSwitchEnabled: true,
-          // Keep more media ahead than dash.js's short default buffer target.
+          // Keep more media ahead than dash.js's short default buffer target
+          // (applyBufferPolicy() raises this a lot while playback is paused).
           bufferTimeDefault: 30,
           bufferTimeAtTopQuality: 60,
           bufferTimeAtTopQualityLongForm: 90,
@@ -545,23 +674,133 @@ const StreamEngine = {
     try { video.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
     player.initialize(video, url, false);
     this.dash = player;
+    // Extend (or trim) the forward-buffer targets to match the current state.
+    this.applyBufferPolicy();
     return { ok: true, mode: 'dash', dash: player };
   },
 };
 
 /* =====================================================================
- * 06. PLAYER — the core playback controller
+ * 06. PLAYER — playback controller + persistent resume positions
  * ===================================================================*/
+
+/**
+ * Where each title was left off. Positions are keyed by the media itself
+ * (its URL, or name/size/date for a local file) rather than by playlist id, so
+ * they survive reloads, re-adding a URL, and swapping between the online and
+ * downloaded copy of the same video.
+ */
+const RESUME_KEY = 'nebula.resume.v1';
+
+const Resume = {
+  MIN: 5,             // don't bother remembering the first few seconds
+  MAX_ENTRIES: 300,
+  MAX_AGE: 180 * 24 * 60 * 60 * 1000, // 6 months
+  store: new Map(),   // key → { t, d, at }
+
+  /** Stable identity of an item, independent of playlist ids. */
+  keyFor(item) {
+    if (!item) return '';
+    if (item.kind === 'file' && item.file) {
+      const f = item.file;
+      return `file:${f.name || 'clip'}:${f.size || 0}:${f.lastModified || 0}`;
+    }
+    const url = item.originalUrl || item.url;
+    return url ? `url:${url}` : '';
+  },
+
+  load() {
+    this.store.clear();
+    try {
+      const raw = localStorage.getItem(RESUME_KEY);
+      const data = raw ? JSON.parse(raw) : null;
+      const entries = data && typeof data === 'object' ? data.items : null;
+      if (entries && typeof entries === 'object') {
+        Object.entries(entries).forEach(([key, value]) => {
+          const t = Number(value && value.t);
+          if (!key || !Number.isFinite(t) || t <= 0) return;
+          this.store.set(key, { t, d: Number(value.d) || 0, at: Number(value.at) || 0 });
+        });
+      }
+    } catch (err) { console.warn('[resume] unable to read stored positions', err); }
+    this.prune({ save: false });
+    return this;
+  },
+
+  save: debounce(function () {
+    try {
+      const items = {};
+      Resume.store.forEach((value, key) => {
+        items[key] = { t: Math.round(value.t * 10) / 10, d: Math.round(value.d || 0), at: value.at || 0 };
+      });
+      localStorage.setItem(RESUME_KEY, JSON.stringify({ version: 1, items }));
+    } catch (err) { console.warn('[resume] unable to save positions', err); }
+  }, 400),
+
+  /** Forget positions that got too old, or trim the list when it grows too long. */
+  prune({ save = true } = {}) {
+    const cutoff = Date.now() - this.MAX_AGE;
+    let changed = false;
+    this.store.forEach((value, key) => {
+      if (!(value.t > 0) || (value.at && value.at < cutoff)) { this.store.delete(key); changed = true; }
+    });
+    if (this.store.size > this.MAX_ENTRIES) {
+      [...this.store.entries()]
+        .sort((a, b) => (a[1].at || 0) - (b[1].at || 0))
+        .slice(0, this.store.size - this.MAX_ENTRIES)
+        .forEach(([key]) => this.store.delete(key));
+      changed = true;
+    }
+    if (save && changed) this.save();
+    return changed;
+  },
+
+  /** Seconds to resume at (0 = start from the beginning). */
+  get(item) {
+    const key = this.keyFor(item);
+    if (!key) return 0;
+    const record = this.store.get(key);
+    if (!record || !(record.t > this.MIN)) return 0;
+    // Watched to (or nearly to) the end last time — start over.
+    if (record.d > 0 && record.t >= record.d - this.finishGap(record.d)) return 0;
+    return record.t;
+  },
+
+  /** Remember `seconds` (a mark at/inside the end clears the entry instead). */
+  set(item, seconds, duration) {
+    const key = this.keyFor(item);
+    if (!key) return;
+    const t = Number(seconds) || 0;
+    const d = Number.isFinite(duration) ? duration : 0;
+    if (d > 0 && t >= d - this.finishGap(d)) { this.clear(item); return; }
+    if (!(t > this.MIN)) return;
+    this.store.set(key, { t, d, at: Date.now() });
+    this.prune();
+    this.save();
+  },
+
+  clear(item) {
+    const key = this.keyFor(item);
+    if (key && this.store.delete(key)) this.save();
+  },
+
+  /** A 10-minute short needs a smaller "almost done" window than a feature film. */
+  finishGap(duration) {
+    return clamp(duration * 0.02, 5, 30);
+  },
+};
 
 const Player = {
   video: null,
   current: null,        // active media item
   objectUrls: new Set(),// blob urls we must revoke
-  resumeMap: new Map(), // item.id → seconds (in-memory resume points)
   _spinnerTimer: null,
   _errorRetry: null,
   _hasPlayed: false,
   _loadGen: 0,
+  _loading: false,      // a load() is in flight (ignore stray pause/seek events)
+  _resumePending: false,// the stored position has not been applied yet
+  _resumeTarget: 0,
 
   init() {
     this.video = $('#video');
@@ -574,6 +813,8 @@ const Player = {
     v.addEventListener('play', () => {
       document.body.classList.add('is-playing');
       this._hasPlayed = true;
+      this._loading = false;
+      StreamEngine.setPaused(false);
       this.updatePlayButton();
       MediaSession.update();
     });
@@ -582,15 +823,20 @@ const Player = {
       this.updatePlayButton();
       this.hideSpinner();
       this.rememberPosition();
+      // Playback stopped, downloading does not: keep filling the buffer ahead.
+      StreamEngine.setPaused(true);
       MediaSession.update();
     });
     v.addEventListener('ended', () => { this.onEnded(); MediaSession.update(); });
     v.addEventListener('progress', throttle(() => Controls.renderProgress(), 250));
+    // Keep the stored position reasonably fresh while playing (not only on pause),
+    // so closing the tab or a crash still resumes in the right place.
+    v.addEventListener('timeupdate', throttle(() => this.rememberPosition(), 10000));
     v.addEventListener('durationchange', () => { Controls.renderProgress(); Controls.renderDuration(); });
     v.addEventListener('volumechange', () => Controls.renderVolume());
     v.addEventListener('ratechange', () => Controls.renderSpeed());
     v.addEventListener('seeking', () => { if (v.readyState < 3) this.showSpinner(); });
-    v.addEventListener('seeked', () => this.hideSpinner());
+    v.addEventListener('seeked', () => { this.hideSpinner(); this._resumePending = false; this.rememberPosition(); });
     v.addEventListener('waiting', () => this.showSpinner());
     v.addEventListener('stalled', () => this.showSpinner());
     v.addEventListener('canplay', () => this.hideSpinner());
@@ -760,9 +1006,19 @@ const Player = {
   },
 
   /** Remember where we were (used to resume after a reload / item switch). */
-  rememberPosition() {
-    if (!this.current || !Number.isFinite(this.video.duration) || this.video.currentTime < 5) return;
-    this.resumeMap.set(this.current.id, this.video.currentTime);
+  rememberPosition({ force = false } = {}) {
+    const item = this.current;
+    if (!item || this._loading) return;
+    const v = this.video;
+    const t = Number(v.currentTime) || 0;
+    const duration = Number.isFinite(v.duration) ? v.duration : 0;
+    // Never clobber a stored mark before the resume seek has landed on it.
+    if (this._resumePending && t < this._resumeTarget - 1) return;
+    this._resumePending = false;
+    // Watched something, then went back to the very start: treat it as a restart.
+    if (t < 1 && this._hasPlayed) { Resume.clear(item); return; }
+    if (!force && !(t > Resume.MIN)) return;
+    Resume.set(item, t, duration);
   },
 
   /* -----------------------------------------------------------------
@@ -778,6 +1034,7 @@ const Player = {
     }
 
     this.rememberPosition();
+    this._loading = true;
     StreamEngine.destroy();
     this.setError(null);
     this.hideEmptyState();
@@ -805,15 +1062,35 @@ const Player = {
     Subtitles.onSourceChanged();
     try { v.load(); } catch { /* noop */ }
 
-    // A previously stored resume point (same session only).
-    const resumeAt = this.resumeMap.get(item.id) || 0;
+    // Pick up where this title was left off (persisted across reloads).
+    const resumeAt = Resume.get(item);
+    this._resumeTarget = resumeAt;
+    this._resumePending = resumeAt > 0;
+    let resumeApplied = !(resumeAt > 0);
     const applyResume = () => {
-      if (resumeAt > 5 && Number.isFinite(v.duration) && v.duration - resumeAt > 3) {
+      if (resumeApplied) return;
+      if (!Number.isFinite(v.duration)) return;   // wait until the duration is known
+      resumeApplied = true;
+      this._resumePending = false;
+      if (v.duration - resumeAt > 3) {
         v.currentTime = resumeAt;
         Toast.show(`Resumed at ${fmtTime(resumeAt)}`, 'info', 2000);
+      } else {
+        Resume.clear(item);                       // the mark sits at the very end
       }
       Controls.renderDuration();
     };
+    // If the mark cannot be applied (live stream, unreadable metadata), stop
+    // treating it as pending so normal position updates resume.
+    setTimeout(() => {
+      if (loadGen !== this._loadGen) return;
+      this._resumePending = false;
+      this._loading = false;
+    }, 20000);
+
+    // A freshly loaded source starts out not-playing: ask for a big buffer
+    // right away. A 'play' event flips this back to the lean window.
+    StreamEngine.setPaused(true);
 
     if (isStreamType(type)) {
       const result = await StreamEngine.attach(v, src, type, {
@@ -827,6 +1104,7 @@ const Player = {
       });
 
       if (!result.ok) {
+        this._loading = false;
         this.setError({ title: `${type.toUpperCase()} could not be loaded`, detail: result.error },
           { retry: () => this.load(item, { force: true }) });
         return;
@@ -855,6 +1133,7 @@ const Player = {
     Subtitles.attachItemTracks(item);
     Subtitles.detectSidecars(item).catch(() => { /* optional */ });
 
+    this._loading = false;
     if (autoplay) this.play();
     else this.updatePlayButton();
   },
@@ -914,6 +1193,8 @@ const Player = {
 
   /** End of the current item: honour loop-one / loop-all / shuffle. */
   onEnded() {
+    // Fully watched — a later visit starts from the beginning again.
+    if (this.current) Resume.clear(this.current);
     const mode = Settings.get('loopMode');
     if (mode === 'one') { this.video.currentTime = 0; this.play(); return; }
     Playlist.advance(1, { auto: true });
@@ -1678,7 +1959,10 @@ const Playlist = {
   serializable() {
     return this.items
       .filter((it) => it.kind !== 'file')
-      .map((it) => ({ id: it.id, kind: it.kind, title: it.title, url: it.url, type: it.type, offline: !!it.offline, addedAt: it.addedAt }));
+      .map((it) => ({
+        id: it.id, kind: it.kind, title: it.title, url: it.url, type: it.type,
+        offline: !!it.offline, originalUrl: it.originalUrl, addedAt: it.addedAt,
+      }));
   },
 
   save: debounce(function () {
@@ -2160,6 +2444,7 @@ const Offline = {
       kind: 'offline',
       title: rec.title,
       url: rec.playUrl,
+      originalUrl: rec.url,   // resume marks follow the video, not the copy
       type: rec.kind,
       offline: true,
       bitrate: rec.bitrate,
@@ -2179,7 +2464,7 @@ const Offline = {
   queue(id) {
     const rec = this.records.find((r) => r.id === id);
     if (!rec) return;
-    Playlist.add({ id: 'off-' + rec.id, kind: 'offline', title: rec.title, url: rec.playUrl, type: rec.kind, offline: true });
+    Playlist.add({ id: 'off-' + rec.id, kind: 'offline', title: rec.title, url: rec.playUrl, originalUrl: rec.url, type: rec.kind, offline: true });
   },
 
   async remove(id) {
@@ -3652,75 +3937,75 @@ const Sources = {
 };
 
 /* ------------------------------------------------------------------
- * Movie title search — Internet Archive's openly licensed catalog only.
- * Search metadata is checked before a direct video file is offered; the
- * Archive item page and declared license remain visible for verification.
+ * Movie / series search — direct-link catalogues of openly licensed video.
+ *
+ * Every catalogue implements the same small interface:
+ *   { id, label, async search(query, { signal }) → result[] }
+ * and a result looks like
+ *   { source, sourceLabel, title, year, creator, license: { url, label },
+ *     fileName, fileSize, duration, url, type, detailsUrl }
+ * Only records that carry an uploader-declared public-domain / Creative
+ * Commons licence and resolve to a directly playable file or stream are
+ * returned, so the player never scrapes watch pages or paid services.
+ * Push another catalogue into MovieSearch.sources to extend it (the README
+ * explains the interface under Customising → “Adding a search catalogue”).
  * ---------------------------------------------------------------- */
-const MovieSearch = {
+
+const MovieNet = {
+  /** fetch + JSON with the privacy-preserving defaults used across the app. */
+  async fetchJson(url, signal) {
+    const response = await fetch(url, {
+      credentials: 'omit', redirect: 'follow', referrerPolicy: 'no-referrer', signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  },
+
+  /** Metadata fields sometimes contain a little HTML — flatten it. */
+  stripHtml(value) {
+    return String(value ?? '').replace(/<[^>]*>/g, ' ');
+  },
+
+  cleanText(value, max = 160) {
+    return this.stripHtml(value)
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0?39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max);
+  },
+
+  /** Run `worker(item)` over `items` with a concurrency cap, keeping the order. */
+  async mapLimit(items, limit, worker) {
+    const list = Array.isArray(items) ? items : [];
+    const out = new Array(list.length);
+    let next = 0;
+    const run = async () => {
+      while (next < list.length) {
+        const index = next++;
+        try { out[index] = await worker(list[index], index); }
+        catch { out[index] = null; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, list.length)) }, run));
+    return out;
+  },
+};
+
+/* ---- Internet Archive: openly licensed movie records with a direct file ---- */
+
+const ArchiveMovies = {
+  id: 'archive',
+  label: 'Internet Archive',
   SEARCH_URL: 'https://archive.org/advancedsearch.php',
   METADATA_URL: 'https://archive.org/metadata/',
   MAX_LOOKUPS: 24,
   MAX_RESULTS: 10,
   LOOKUP_CONCURRENCY: 4,
-  searchToken: 0,
-  controller: null,
-  timeoutId: null,
-  lastQuery: '',
-
-  init() {
-    $('#movieSearchForm').addEventListener('submit', (e) => {
-      e.preventDefault();
-      this.search();
-    });
-    $('#btnMovieSearchClose').addEventListener('click', () => this.close());
-    $('#btnMovieSearchCancel').addEventListener('click', () => this.close());
-    $('#movieSearchDialog').addEventListener('close', () => this.cancelPending());
-  },
-
-  /** A non-URL typed into the online-video field is a handy search prefill. */
-  queryFromUrlInput() {
-    const raw = String($('#urlInput')?.value || '').trim();
-    if (!raw) return '';
-    if (/^https?:\/\//i.test(raw) || /^(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?::\d+)?(?:\/|$)/i.test(raw)) return '';
-    return raw;
-  },
-
-  open({ query } = {}) {
-    const field = $('#movieSearchQuery');
-    const initial = String(query ?? this.queryFromUrlInput() ?? '').trim() || this.lastQuery;
-    field.value = initial.slice(0, 120);
-    $('#movieSearchResults').replaceChildren();
-    this.setStatus('Enter a title to search public-domain and Creative Commons movie files.');
-    Shell.openDialog('#movieSearchDialog');
-    setTimeout(() => field.focus?.(), 60);
-  },
-
-  close() {
-    const dialog = $('#movieSearchDialog');
-    if (!dialog) return;
-    if (typeof dialog.close === 'function') dialog.close();
-    else {
-      dialog.removeAttribute('open');
-      this.cancelPending();
-    }
-  },
-
-  cancelPending() {
-    this.searchToken++;
-    this.controller?.abort();
-    this.controller = null;
-    if (this.timeoutId) clearTimeout(this.timeoutId);
-    this.timeoutId = null;
-    const button = $('#btnMovieSearchGo');
-    if (button) button.disabled = false;
-  },
-
-  setStatus(text, kind = '') {
-    const status = $('#movieSearchStatus');
-    status.textContent = text;
-    status.classList.toggle('is-busy', kind === 'busy');
-    status.classList.toggle('is-warn', kind === 'warn');
-  },
 
   /** Quote a title as one Lucene phrase before URLSearchParams encodes it. */
   quotePhrase(value) {
@@ -3777,18 +4062,10 @@ const MovieSearch = {
     return `https://archive.org/download/${encodeURIComponent(identifier)}/${path}`;
   },
 
-  async fetchJson(url, signal) {
-    const response = await fetch(url, {
-      credentials: 'omit', redirect: 'follow', referrerPolicy: 'no-referrer', signal,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.json();
-  },
-
   async resolveHit(hit, signal) {
     const identifier = String(hit?.identifier || '').trim();
     if (!/^[a-z0-9][a-z0-9._-]{0,199}$/i.test(identifier)) return null;
-    const record = await this.fetchJson(`${this.METADATA_URL}${encodeURIComponent(identifier)}`, signal);
+    const record = await MovieNet.fetchJson(`${this.METADATA_URL}${encodeURIComponent(identifier)}`, signal);
     const metadata = record?.metadata || {};
     if (metadata.mediatype && String(metadata.mediatype).toLowerCase() !== 'movies') return null;
 
@@ -3804,48 +4081,331 @@ const MovieSearch = {
       .replace(/\s+/g, ' ').trim().slice(0, 100);
     const url = this.directFileUrl(identifier, file.name);
     return {
-      identifier,
+      source: this.id,
+      sourceLabel: this.label,
       title,
       year,
       creator,
       license,
       fileName: file.name,
       fileSize: Number(file.size) || 0,
+      duration: 0,
       url,
       type: detectType(url, 'progressive'),
       detailsUrl: `https://archive.org/details/${encodeURIComponent(identifier)}`,
     };
   },
 
-  async resolveHits(hits, signal) {
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const hits = data?.response?.docs;
+    if (!Array.isArray(hits)) throw new Error('Unexpected search response');
     const unique = [];
     const seen = new Set();
     for (const hit of hits.slice(0, this.MAX_LOOKUPS)) {
       const id = String(hit?.identifier || '');
       if (id && !seen.has(id)) { seen.add(id); unique.push(hit); }
     }
-    const resolved = new Array(unique.length);
-    let next = 0;
-    const worker = async () => {
-      while (next < unique.length && !signal.aborted) {
-        const index = next++;
-        try { resolved[index] = await this.resolveHit(unique[index], signal); }
-        catch (err) {
-          if (signal.aborted) return;
-          console.warn('[movie-search] skipped an unreadable Archive record', err);
-          resolved[index] = null;
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(this.LOOKUP_CONCURRENCY, unique.length) }, worker));
+    const resolved = await MovieNet.mapLimit(unique, this.LOOKUP_CONCURRENCY, (hit) => this.resolveHit(hit, signal));
     return resolved.filter(Boolean).slice(0, this.MAX_RESULTS);
+  },
+};
+
+/* ---- Wikimedia Commons: free media, direct upload.wikimedia.org files ---- */
+
+const CommonsMovies = {
+  id: 'commons',
+  label: 'Wikimedia Commons',
+  API: 'https://commons.wikimedia.org/w/api.php',
+  MAX_LOOKUPS: 20,
+  MAX_RESULTS: 8,
+
+  searchUrl(query) {
+    const params = new URLSearchParams({
+      action: 'query',
+      format: 'json',
+      origin: '*',                       // required for anonymous CORS reads
+      generator: 'search',
+      gsrsearch: `${query} filetype:video`,
+      gsrnamespace: '6',
+      gsrlimit: String(this.MAX_LOOKUPS),
+      prop: 'imageinfo',
+      iiprop: 'url|size|mime|user|extmetadata',
+      iiextmetadatafilter: 'LicenseShortName|LicenseUrl|Artist|DateTimeOriginal',
+    });
+    return `${this.API}?${params.toString()}`;
+  },
+
+  /** Keep Wikimedia's uploader-declared CC / public-domain marks only. */
+  licenseInfo(info = {}) {
+    const ext = info.extmetadata || {};
+    const short = MovieNet.cleanText(ext.LicenseShortName?.value || '', 60);
+    const url = MovieNet.cleanText(ext.LicenseUrl?.value || '', 200);
+    const cc = /creativecommons\.org\/licenses\//i.test(url) || /^cc(0|\s*by)/i.test(short);
+    const pd = /creativecommons\.org\/(?:publicdomain|licenses\/publicdomain)/i.test(url)
+      || /public domain|no known copyright|no restrictions|^pd/i.test(short);
+    if (!cc && !pd) return null;
+    return {
+      url: url || 'https://commons.wikimedia.org/wiki/Commons:Licensing',
+      label: `${short || (pd ? 'Public domain' : 'Creative Commons')} · uploader-declared`,
+    };
+  },
+
+  /** The API appends analytics params to file URLs — drop them. */
+  directUrl(raw) {
+    try {
+      const url = new URL(String(raw));
+      if (!/^https?:$/.test(url.protocol)) return '';
+      [...url.searchParams.keys()].forEach((key) => { if (/^utm_/i.test(key)) url.searchParams.delete(key); });
+      return url.href;
+    } catch { return ''; }
+  },
+
+  /** video/* plus Commons' Ogg Theora files (served as application/ogg). */
+  playable(info) {
+    const mime = String(info.mime || '').toLowerCase();
+    if (mime.startsWith('video/')) return true;
+    const path = String(info.url || '').split('?')[0].toLowerCase();
+    return mime === 'application/ogg' && /\.(ogv|ogg|oga|webm)$/.test(path);
+  },
+
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const pages = data?.query?.pages ? Object.values(data.query.pages) : [];
+    const results = [];
+    for (const page of pages) {
+      if (signal?.aborted) break;
+      const info = Array.isArray(page.imageinfo) ? page.imageinfo[0] : null;
+      if (!info || !this.playable(info)) continue;
+      const license = this.licenseInfo(info);
+      if (!license) continue;
+      const url = this.directUrl(info.url);
+      if (!url) continue;
+      const fileName = MovieNet.cleanText(String(page.title || '').replace(/^File:/, ''), 200);
+      const title = MovieNet.cleanText(fileName.replace(/\.[a-z0-9]+$/i, '').replace(/_/g, ' '), 180) || fileName;
+      const stamp = MovieNet.cleanText(info.extmetadata?.DateTimeOriginal?.value || '', 40);
+      results.push({
+        source: this.id,
+        sourceLabel: this.label,
+        title,
+        year: stamp.match(/\b(1[89]\d\d|20\d\d)\b/)?.[0] || '',
+        creator: MovieNet.cleanText(info.extmetadata?.Artist?.value || info.user || '', 100),
+        license,
+        fileName,
+        fileSize: Number(info.size) || 0,
+        duration: Number(info.duration) || 0,
+        url,
+        type: detectType(url, 'progressive'),
+        detailsUrl: info.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(String(page.title || ''))}`,
+      });
+      if (results.length >= this.MAX_RESULTS) break;
+    }
+    return results;
+  },
+};
+
+/* ---- PeerTube: federated open video, resolved to the instance's own file ---- */
+
+const PeerTubeMovies = {
+  id: 'peertube',
+  label: 'PeerTube',
+  INDEX_URL: 'https://sepiasearch.org/api/v1/search/videos',
+  MAX_LOOKUPS: 10,
+  MAX_RESULTS: 6,
+  LOOKUP_CONCURRENCY: 4,
+  /* PeerTube licence ids (see the PeerTube API docs) — anything else is
+     "unknown" and is skipped, matching the app's openly-licensed-only rule. */
+  LICENSES: {
+    1: 'CC BY', 2: 'CC BY-SA', 3: 'CC BY-ND', 4: 'CC BY-NC',
+    5: 'CC BY-NC-SA', 6: 'CC BY-NC-ND', 7: 'CC0 · public domain',
+  },
+  LICENSE_SLUGS: { 1: 'by', 2: 'by-sa', 3: 'by-nd', 4: 'by-nc', 5: 'by-nc-sa', 6: 'by-nc-nd' },
+
+  searchUrl(query) {
+    const params = new URLSearchParams({
+      search: query,
+      count: String(this.MAX_LOOKUPS),
+      sort: '-match',
+      isLive: 'false',
+      nsfw: 'false',
+    });
+    return `${this.INDEX_URL}?${params.toString()}`;
+  },
+
+  /** The federated index only knows the instance host, not the file URL. */
+  hostOf(hit) {
+    try {
+      const host = new URL(String(hit?.url || '')).host;
+      return /^[a-z0-9.-]+(?::\d+)?$/i.test(host) ? host : '';
+    } catch { return ''; }
+  },
+
+  detailUrl(host, uuid) {
+    return `https://${host}/api/v1/videos/${encodeURIComponent(uuid)}`;
+  },
+
+  /** Highest-resolution progressive MP4 the instance exposes. */
+  bestFile(files) {
+    if (!Array.isArray(files)) return null;
+    return files
+      .filter((file) => file && typeof file.fileUrl === 'string' && /^https?:\/\//i.test(file.fileUrl) && file.hasVideo !== false)
+      .sort((a, b) => (Number(b.resolution?.id) || Number(b.height) || 0) - (Number(a.resolution?.id) || Number(a.height) || 0))[0] || null;
+  },
+
+  licenseInfo(licence) {
+    const label = this.LICENSES[licence?.id];
+    if (!label) return null;                       // "Unknown" is not good enough
+    const slug = this.LICENSE_SLUGS[licence.id];
+    return {
+      url: slug ? `https://creativecommons.org/licenses/${slug}/4.0/` : 'https://creativecommons.org/publicdomain/zero/1.0/',
+      label: `${label} · uploader-declared`,
+    };
+  },
+
+  async resolve(hit, signal) {
+    const host = this.hostOf(hit);
+    const uuid = String(hit?.uuid || '');
+    if (!host || !uuid || signal?.aborted) return null;
+    const detail = await MovieNet.fetchJson(this.detailUrl(host, uuid), signal);
+    if (!detail || String(detail.privacy?.id) !== '1') return null;
+    const license = this.licenseInfo(detail.licence || hit.licence);
+    if (!license) return null;
+
+    const file = this.bestFile(detail.files);
+    const playlist = Array.isArray(detail.streamingPlaylists) ? detail.streamingPlaylists[0] : null;
+    const playlistUrl = playlist && typeof playlist.playlistUrl === 'string' && /^https?:\/\//i.test(playlist.playlistUrl)
+      ? playlist.playlistUrl : '';
+    const url = file ? file.fileUrl : playlistUrl;
+    if (!url) return null;
+
+    const published = String(detail.publishedAt || hit.publishedAt || '');
+    return {
+      source: this.id,
+      sourceLabel: `${this.label} · ${host}`,
+      title: MovieNet.cleanText(detail.name || hit.name, 180),
+      year: published.match(/\b(1[89]\d\d|20\d\d)\b/)?.[0] || '',
+      creator: MovieNet.cleanText(detail.channel?.displayName || detail.account?.displayName || '', 100),
+      license,
+      fileName: file ? (String(file.fileUrl).split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1] || 'mp4') : 'm3u8',
+      fileSize: Number(file?.size) || 0,
+      duration: Number(detail.duration) || Number(hit.duration) || 0,
+      url,
+      type: detectType(url, 'progressive'),
+      detailsUrl: detail.url || hit.url || `https://${host}/videos/watch/${uuid}`,
+    };
+  },
+
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const hits = (Array.isArray(data?.data) ? data.data : [])
+      .filter((hit) => hit && hit.uuid && !hit.isLive
+        && (hit.privacy?.id === undefined || String(hit.privacy.id) === '1'))
+      .slice(0, this.MAX_LOOKUPS);
+    const resolved = await MovieNet.mapLimit(hits, this.LOOKUP_CONCURRENCY, (hit) => this.resolve(hit, signal));
+    const results = [];
+    const seenTitles = new Set();
+    for (const movie of resolved) {
+      if (!movie) continue;
+      const dedupe = movie.title.toLowerCase();
+      if (seenTitles.has(dedupe)) continue;        // the index can list one video twice
+      seenTitles.add(dedupe);
+      results.push(movie);
+      if (results.length >= this.MAX_RESULTS) break;
+    }
+    return results;
+  },
+};
+
+const MovieSearch = {
+  /** Adding a catalogue here is all it takes — the UI is built from this list. */
+  sources: [ArchiveMovies, CommonsMovies, PeerTubeMovies],
+  searchToken: 0,
+  controller: null,
+  timeoutId: null,
+  lastQuery: '',
+
+  init() {
+    $('#movieSearchForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.search();
+    });
+    $('#btnMovieSearchClose').addEventListener('click', () => this.close());
+    $('#btnMovieSearchCancel').addEventListener('click', () => this.close());
+    $('#movieSearchDialog').addEventListener('close', () => this.cancelPending());
+
+    /* Catalogue picker (one source of truth: MovieSearch.sources). */
+    const select = $('#movieSearchSource');
+    if (select) {
+      select.replaceChildren(
+        el('option', { value: 'all', text: 'All catalogues' }),
+        ...this.sources.map((source) => el('option', { value: source.id, text: source.label })),
+      );
+      const saved = String(Settings.get('movieSearchSource') || 'all');
+      select.value = this.sources.some((source) => source.id === saved) ? saved : 'all';
+      select.addEventListener('change', () => {
+        Settings.set('movieSearchSource', select.value);
+        if (this.lastQuery && $('#movieSearchResults').childElementCount) this.search();
+      });
+    }
+  },
+
+  /** A non-URL typed into the online-video field is a handy search prefill. */
+  queryFromUrlInput() {
+    const raw = String($('#urlInput')?.value || '').trim();
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw) || /^(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?::\d+)?(?:\/|$)/i.test(raw)) return '';
+    return raw;
+  },
+
+  /** The catalogues the picker currently selects. */
+  selectedSources() {
+    const select = $('#movieSearchSource');
+    const picked = select ? this.sources.find((source) => source.id === select.value) : null;
+    return picked ? [picked] : this.sources;
+  },
+
+  open({ query } = {}) {
+    const field = $('#movieSearchQuery');
+    const initial = String(query ?? this.queryFromUrlInput() ?? '').trim() || this.lastQuery;
+    field.value = initial.slice(0, 120);
+    $('#movieSearchResults').replaceChildren();
+    this.setStatus('Enter a title to search open, directly playable catalogues.');
+    Shell.openDialog('#movieSearchDialog');
+    setTimeout(() => field.focus?.(), 60);
+  },
+
+  close() {
+    const dialog = $('#movieSearchDialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else {
+      dialog.removeAttribute('open');
+      this.cancelPending();
+    }
+  },
+
+  cancelPending() {
+    this.searchToken++;
+    this.controller?.abort();
+    this.controller = null;
+    if (this.timeoutId) clearTimeout(this.timeoutId);
+    this.timeoutId = null;
+    const button = $('#btnMovieSearchGo');
+    if (button) button.disabled = false;
+  },
+
+  setStatus(text, kind = '') {
+    const status = $('#movieSearchStatus');
+    status.textContent = text;
+    status.classList.toggle('is-busy', kind === 'busy');
+    status.classList.toggle('is-warn', kind === 'warn');
   },
 
   async search() {
     const field = $('#movieSearchQuery');
     const query = String(field.value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
     if (!query) {
-      this.setStatus('Enter a movie name to search.', 'warn');
+      this.setStatus('Enter a movie or series name to search.', 'warn');
       field.focus();
       return;
     }
@@ -3862,34 +4422,59 @@ const MovieSearch = {
     const token = ++this.searchToken;
     this.lastQuery = query;
     field.value = query;
+    const sources = this.selectedSources();
     $('#movieSearchResults').replaceChildren();
     $('#btnMovieSearchGo').disabled = true;
-    this.setStatus(`Searching Internet Archive for “${query}”…`, 'busy');
+    this.setStatus(sources.length === 1
+      ? `Searching ${sources[0].label} for “${query}”…`
+      : `Searching ${sources.length} catalogues for “${query}”…`, 'busy');
     this.timeoutId = setTimeout(() => controller.abort(), 30000);
 
     try {
-      const data = await this.fetchJson(this.searchUrl(query), controller.signal);
-      const hits = data?.response?.docs;
-      if (!Array.isArray(hits)) throw new Error('Unexpected search response');
-      const movies = await this.resolveHits(hits, controller.signal);
+      const settled = await Promise.all(sources.map(async (source) => {
+        try {
+          const items = await source.search(query, { signal: controller.signal });
+          return { source, items: Array.isArray(items) ? items : [] };
+        } catch (err) {
+          if (controller.signal.aborted) return { source, items: [], aborted: true };
+          console.warn(`[movie-search] ${source.label} failed`, err);
+          return { source, items: [], failed: true };
+        }
+      }));
       if (token !== this.searchToken) return;
       if (controller.signal.aborted) {
         this.setStatus('Search timed out or was cancelled. Try again.', 'warn');
         return;
       }
+
+      const movies = [];
+      const seen = new Set();
+      const failed = [];
+      settled.forEach(({ source, items, failed: broken }) => {
+        if (broken) failed.push(source.label);
+        items.forEach((movie) => {
+          if (!movie?.url || seen.has(movie.url)) return;
+          seen.add(movie.url);
+          movies.push(movie);
+        });
+      });
+
       if (!movies.length) {
-        this.setStatus('No matching public-domain or Creative Commons item with a direct video file was found. Try another title or spelling.');
+        this.setStatus(failed.length
+          ? `No direct video file found — ${failed.join(', ')} could not be reached. Try again.`
+          : 'No matching openly licensed item with a direct video file was found. Try another title or spelling.');
         return;
       }
       this.renderResults(movies);
-      this.setStatus(`Found ${movies.length} direct video file${movies.length === 1 ? '' : 's'} on Internet Archive. Check each record’s license before streaming.`);
+      const counts = settled.filter((entry) => entry.items.length)
+        .map((entry) => `${entry.source.label}: ${entry.items.length}`).join(' · ');
+      let status = `Found ${movies.length} direct video file${movies.length === 1 ? '' : 's'} (${counts}). Licences are uploader-declared — open a record to verify the rights.`;
+      if (failed.length) status += ` ${failed.join(', ')} could not be reached.`;
+      this.setStatus(status);
     } catch (err) {
       if (token !== this.searchToken) return;
-      if (controller.signal.aborted) this.setStatus('Search timed out or was cancelled. Try again.', 'warn');
-      else {
-        console.warn('[movie-search] search failed', err);
-        this.setStatus('Could not reach Internet Archive. Check your connection and try again.', 'warn');
-      }
+      console.warn('[movie-search] search failed', err);
+      this.setStatus('Could not reach the search catalogues. Check your connection and try again.', 'warn');
     } finally {
       if (token === this.searchToken) {
         if (this.timeoutId) clearTimeout(this.timeoutId);
@@ -3912,10 +4497,15 @@ const MovieSearch = {
         text: movie.title,
       });
       const meta = el('div', { class: 'movie-result-meta' });
+      if (movie.sourceLabel) meta.append(el('span', { class: 'tag source', text: movie.sourceLabel }));
       if (movie.year) meta.append(el('span', { class: 'tag', text: movie.year }));
       if (movie.creator) meta.append(el('span', { text: `by ${movie.creator}` }));
-      const extension = movie.fileName.split('.').pop().toUpperCase();
-      const mediaText = `${extension} direct file${movie.fileSize ? ` · ${fmtBytes(movie.fileSize)}` : ''}`;
+      const extension = String(movie.fileName || '').split('.').pop().toUpperCase();
+      const mediaText = [
+        extension ? `${extension} direct file` : 'Direct file',
+        movie.duration ? fmtTime(movie.duration) : '',
+        movie.fileSize ? fmtBytes(movie.fileSize) : '',
+      ].filter(Boolean).join(' · ');
       meta.append(el('span', { class: 'tag', text: mediaText }));
       meta.append(el('a', {
         class: 'tag license', href: movie.license.url, target: '_blank',
@@ -4072,6 +4662,16 @@ const Shell = {
     $('#optSeekZones').checked = !!Settings.get('seekZones');
     $('#optSeekZones').addEventListener('change', (e) => Settings.set('seekZones', e.target.checked));
 
+    /* Keep buffering ahead while paused (StreamEngine picks this up live) */
+    $('#optPrebuffer').checked = Settings.get('prebufferWhilePaused') !== false;
+    $('#optPrebuffer').addEventListener('change', (e) => {
+      Settings.set('prebufferWhilePaused', e.target.checked);
+      StreamEngine.applyBufferPolicy({ kick: true });
+      Toast.show(e.target.checked
+        ? 'Streams keep downloading ahead while paused'
+        : 'Streams stop downloading ahead while paused', 'info', 2400);
+    });
+
     /* Install prompt (PWA) */
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
@@ -4181,6 +4781,7 @@ const UI = {
 const App = {
   async start() {
     Settings.load();
+    Resume.load();
     Toast.init();
     Theme.init();
 
