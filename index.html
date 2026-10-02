@@ -119,10 +119,10 @@
       <!-- The stage: fullscreen target + all gestures live here -->
       <div class="stage" id="playerStage" tabindex="-1" aria-label="Video area. Double-tap or double-click to play or pause. Single tap toggles the control bar.">
 
-        <video id="video" class="video" playsinline webkit-playsinline preload="metadata" controlslist="nodownload" x-webkit-airplay="allow"></video>
+        <video id="video" class="video" playsinline webkit-playsinline preload="metadata" controlslist="nodownload" x-webkit-airplay="allow" referrerpolicy="no-referrer"></video>
 
-        <!-- Center play button (shown while paused, before first play) -->
-        <button class="big-play" id="bigPlay" type="button" aria-label="Play">
+        <!-- Center play button (shown only before the first play / when autoplay is blocked) -->
+        <button class="big-play" id="bigPlay" type="button" aria-label="Play" hidden>
           <svg aria-hidden="true"><use href="#i-play"/></svg>
         </button>
 
@@ -167,20 +167,19 @@
         </div>
       </div>
 
-      <!-- Title strip -->
-      <div class="title-strip">
-        <div class="title-text">
-          <p class="now-playing-label" id="nowPlayingLabel">Nothing playing</p>
-          <h2 class="now-playing-title" id="nowPlayingTitle" title="">—</h2>
-        </div>
-        <div class="title-badges">
-          <span class="badge" id="sourceBadge" hidden></span>
-          <span class="badge badge-offline" id="offlineBadge" hidden title="This item is stored on your device"><svg aria-hidden="true"><use href="#i-check-circle"/></svg>Offline copy</span>
-        </div>
-      </div>
-
-      <!-- ---------- Control bar ---------- -->
+      <!-- ---------- Control bar (overlay on the video) ---------- -->
       <div class="controls" id="controlsBar" role="group" aria-label="Playback controls">
+
+        <div class="title-strip">
+          <div class="title-text">
+            <p class="now-playing-label" id="nowPlayingLabel">Nothing playing</p>
+            <h2 class="now-playing-title" id="nowPlayingTitle" title="">—</h2>
+          </div>
+          <div class="title-badges">
+            <span class="badge" id="sourceBadge" hidden></span>
+            <span class="badge badge-offline" id="offlineBadge" hidden title="This item is stored on your device"><svg aria-hidden="true"><use href="#i-check-circle"/></svg>Offline copy</span>
+          </div>
+        </div>
 
         <!-- Progress row -->
         <div class="progress-row">
@@ -326,7 +325,7 @@
             <button class="btn btn-ghost" id="btnDemoUrl" type="button" title="Load a sample stream (needs internet)">Sample</button>
           </div>
         </form>
-        <p class="card-hint">Direct links only — MP4/WebM, HLS (<code>.m3u8</code>) and DASH (<code>.mpd</code>) are detected automatically. HLS/DASH need the streaming libraries (bundled locally, CDN used as fallback). <span class="muted">Cross-origin hosts must allow your origin (CORS).</span></p>
+        <p class="card-hint">Direct file links only — MP4/WebM, HLS (<code>.m3u8</code>) and DASH (<code>.mpd</code>) are detected automatically. Watch-page URLs (YouTube, Vimeo, …) cannot be played. HLS/DASH playlists need CORS; progressive files play without it.</p>
       </section>
 
       <section class="card" id="cardLocal">

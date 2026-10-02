@@ -23,7 +23,7 @@
 /* ---------------------------------------------------------------------
  * Configuration
  * ------------------------------------------------------------------ */
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const SHELL_CACHE = `nebula-shell-${VERSION}`;
 const MEDIA_CACHE = `nebula-media-${VERSION}`;
 const INDEX_CACHE = `nebula-index-${VERSION}`;
@@ -60,8 +60,9 @@ const state = {
 };
 
 /** Fetch with credentials omitted — media hosts rarely need cookies, and this
- *  keeps cached responses usable across sessions without "Private" mismatches. */
-const MEDIA_FETCH_INIT = { credentials: 'omit', cache: 'no-store' };
+ *  keeps cached responses usable across sessions without "Private" mismatches.
+ *  `no-referrer` avoids CDNs that reject hotlinking based on the player origin. */
+const MEDIA_FETCH_INIT = { credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' };
 
 async function getCache(name) {
   return caches.open(name);
@@ -135,6 +136,7 @@ self.addEventListener('activate', (event) => {
         if (res.ok) (await getCache(SHELL_CACHE)).put(url, res);
       } catch { /* offline install — the previous cache stays */ }
     }));
+    await loadIndex();
     await self.clients.claim();
   })());
 });
@@ -185,6 +187,18 @@ async function handleMessage(data, event) {
 /* =====================================================================
  * FETCH HANDLING
  * ===================================================================*/
+
+/** True when this request is a stored offline video (or one of its segments). */
+function isKnownOfflineRequest(request, url) {
+  const index = state.index;
+  if (!index || !Array.isArray(index.items) || !index.items.length) return false;
+  const pathname = url.pathname;
+  return index.items.some((rec) =>
+    (rec.playPath && rec.playPath === pathname) ||
+    (rec.resourcePaths && rec.resourcePaths.includes(pathname)) ||
+    (rec.kind === 'progressive' && rec.url === request.url));
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
 
@@ -195,6 +209,14 @@ self.addEventListener('fetch', (event) => {
 
   // Chrome's "only-if-cached" probes must not hit the network.
   if (request.cache === 'only-if-cached' && request.mode !== 'same-origin') return;
+
+  // Do NOT intercept uncached cross-origin traffic. Putting the SW in the
+  // middle of <video> / hls.js / dash.js requests is a common cause of
+  // CORS and Referer failures ("cannot load this video"). Offline copies
+  // are still served because they are listed in the download index.
+  if (url.origin !== self.location.origin && !isKnownOfflineRequest(request, url)) {
+    return;
+  }
 
   event.respondWith(route(request, url).catch((err) => {
     console.warn('[sw] fetch failed', request.url, err);

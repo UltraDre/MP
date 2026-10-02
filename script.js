@@ -128,6 +128,61 @@ function hostFromUrl(url) {
   try { return new URL(url, location.href).host; } catch { return ''; }
 }
 
+/** Hostname without a leading www. */
+function hostName(url) {
+  try { return new URL(url, location.href).hostname.replace(/^www\./i, '').toLowerCase(); } catch { return ''; }
+}
+
+/**
+ * Rewrite share-page URLs that have a well-known direct-file equivalent
+ * (Google Drive, Dropbox, GitHub blob pages). Returns the original string
+ * when nothing applies.
+ */
+function rewriteMediaUrl(raw) {
+  const value = String(raw || '').trim();
+  try {
+    const u = new URL(value);
+    const host = u.hostname.replace(/^www\./i, '').toLowerCase();
+
+    const driveId = u.pathname.match(/\/file\/d\/([^/]+)/)?.[1]
+      || ((host === 'drive.google.com' || host === 'docs.google.com') ? u.searchParams.get('id') : null);
+    if (driveId && /(?:^|\.)google\.com$/.test(host)) {
+      return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(driveId)}`;
+    }
+
+    if (host === 'dropbox.com' || host.endsWith('.dropbox.com')) {
+      u.searchParams.set('dl', '1');
+      return u.toString();
+    }
+
+    if (host === 'github.com' && /\/blob\//.test(u.pathname)) {
+      return value.replace('://github.com/', '://raw.githubusercontent.com/').replace('/blob/', '/');
+    }
+  } catch { /* keep original */ }
+  return value;
+}
+
+/**
+ * Watch-page hosts that cannot be fed to <video>. Empty string = looks playable.
+ */
+function unplayableHint(url) {
+  const host = hostName(url);
+  if (!host) return '';
+  if (/(?:^|\.)youtube\.com$|(?:^|\.)youtube-nocookie\.com$|^youtu\.be$/.test(host)) {
+    return 'YouTube watch-page links cannot be played here. Paste a direct MP4/WebM/HLS URL, or open the file from your device.';
+  }
+  if (/(?:^|\.)vimeo\.com$/.test(host)) {
+    return 'Vimeo page links cannot be played here. Use a direct MP4/HLS URL or a local file.';
+  }
+  if (/(?:^|\.)(?:tiktok|instagram|facebook|twitter|x)\.com$|^fb\.watch$/.test(host)) {
+    return 'Social media page links cannot be played directly. Use a direct media file URL or a local file.';
+  }
+  if (/(?:^|\.)(?:netflix|twitch|dailymotion)\.com$/.test(host)) {
+    return 'This site does not expose a direct media file. Use an MP4/WebM/HLS/DASH URL or a local file.';
+  }
+  return '';
+}
+
 /* =====================================================================
  * 02. PERSISTENCE (localStorage)
  * ===================================================================*/
@@ -352,18 +407,22 @@ const StreamEngine = {
   async _attachHls(video, url, handlers) {
     // Native HLS (Safari, iOS, some Android) — preferred when available
     // because it keeps hardware decoding and AirPlay support.
-    const canNative = video.canPlayType('application/vnd.apple.mpegurl');
-    if (canNative && !window.Hls) {
-      return { ok: true, mode: 'native-hls' };
-    }
-    if (canNative && window.Hls && !window.Hls.isSupported()) {
+    const canNative = !!video.canPlayType('application/vnd.apple.mpegurl');
+    if (canNative && (!window.Hls || !window.Hls.isSupported())) {
+      video.referrerPolicy = 'no-referrer';
+      video.src = url;
       return { ok: true, mode: 'native-hls' };
     }
 
     const loaded = await this.ensureLibrary('hls');
     if (!loaded) return { ok: false, mode: 'none', error: 'hls.js could not be loaded (offline and not cached?)' };
     if (!window.Hls.isSupported()) {
-      return canNative ? { ok: true, mode: 'native-hls' } : { ok: false, mode: 'none', error: 'This browser cannot play HLS (no MSE support).' };
+      if (canNative) {
+        video.referrerPolicy = 'no-referrer';
+        video.src = url;
+        return { ok: true, mode: 'native-hls' };
+      }
+      return { ok: false, mode: 'none', error: 'This browser cannot play HLS (no MSE support).' };
     }
 
     const hls = new window.Hls({
@@ -373,6 +432,20 @@ const StreamEngine = {
       maxBufferLength: 60,
       manifestLoadingTimeOut: 15000,
       fragLoadingTimeOut: 60000,
+      xhrSetup(xhr) {
+        try { xhr.withCredentials = false; } catch { /* ignore */ }
+      },
+      fetchSetup(context, initParams) {
+        try {
+          const init = Object.assign({}, initParams || {}, {
+            credentials: 'omit',
+            referrerPolicy: 'no-referrer',
+          });
+          return new Request(context.url, init);
+        } catch {
+          return new Request(context.url, { credentials: 'omit', referrerPolicy: 'no-referrer' });
+        }
+      },
     });
     this.hls = hls;
 
@@ -444,6 +517,7 @@ const StreamEngine = {
       }
     });
     player.on(window.dashjs.MediaPlayer.events.MANIFEST_LOADED, () => handlers.onStreamReady?.({}));
+    try { video.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
     player.initialize(video, url, false);
     this.dash = player;
     return { ok: true, mode: 'dash', dash: player };
@@ -461,14 +535,30 @@ const Player = {
   resumeMap: new Map(), // item.id → seconds (in-memory resume points)
   _spinnerTimer: null,
   _errorRetry: null,
+  _hasPlayed: false,
+  _loadGen: 0,
 
   init() {
     this.video = $('#video');
     const v = this.video;
+    try { v.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
 
     /* ---- core element events ---- */
-    v.addEventListener('play', () => { document.body.classList.add('is-playing'); this.updatePlayButton(); MediaSession.update(); });
-    v.addEventListener('pause', () => { document.body.classList.remove('is-playing'); this.updatePlayButton(); this.hideSpinner(); this.rememberPosition(); MediaSession.update(); });
+    v.addEventListener('play', () => {
+      document.body.classList.add('is-playing');
+      this._hasPlayed = true;
+      this.updatePlayButton();
+      if (!this._muteFlash) Controls.flashGesture(true, 'Playing');
+      MediaSession.update();
+    });
+    v.addEventListener('pause', () => {
+      document.body.classList.remove('is-playing');
+      this.updatePlayButton();
+      this.hideSpinner();
+      this.rememberPosition();
+      if (!v.ended && !this._muteFlash) Controls.flashGesture(false, 'Paused');
+      MediaSession.update();
+    });
     v.addEventListener('ended', () => { this.onEnded(); MediaSession.update(); });
     v.addEventListener('progress', throttle(() => Controls.renderProgress(), 250));
     v.addEventListener('durationchange', () => { Controls.renderProgress(); Controls.renderDuration(); });
@@ -479,6 +569,7 @@ const Player = {
     v.addEventListener('waiting', () => this.showSpinner());
     v.addEventListener('stalled', () => this.showSpinner());
     v.addEventListener('canplay', () => this.hideSpinner());
+    v.addEventListener('canplaythrough', () => this.hideSpinner());
     v.addEventListener('playing', () => { this.hideSpinner(); this.setError(null); });
     v.addEventListener('loadedmetadata', () => { Controls.renderDuration(); this.hideEmptyState(); });
     v.addEventListener('error', () => this.onMediaError());
@@ -577,13 +668,34 @@ const Player = {
   },
 
   showSpinner() {
+    // Never show the buffering dots unless we actually have a source in flight.
+    if (!this.current) return;
+    const v = this.video;
+    if (!v) return;
+    if (!v.src && !v.currentSrc && !StreamEngine.hls && !StreamEngine.dash) return;
     clearTimeout(this._spinnerTimer);
-    this._spinnerTimer = setTimeout(() => { $('#spinner').hidden = false; }, 220);
+    this._spinnerTimer = setTimeout(() => {
+      if (!this.current) return;
+      const node = $('#spinner');
+      if (node) { node.hidden = false; node.setAttribute('aria-hidden', 'false'); }
+    }, 220);
   },
-  hideSpinner() { clearTimeout(this._spinnerTimer); $('#spinner').hidden = true; },
+  hideSpinner() {
+    clearTimeout(this._spinnerTimer);
+    this._spinnerTimer = null;
+    const node = $('#spinner');
+    if (node) { node.hidden = true; node.setAttribute('aria-hidden', 'true'); }
+  },
 
-  hideEmptyState() { $('#emptyState').hidden = true; },
-  showEmptyState() { $('#emptyState').hidden = false; },
+  hideEmptyState() {
+    $('#emptyState').hidden = true;
+    document.body.classList.remove('is-empty');
+  },
+  showEmptyState() {
+    this.hideSpinner();
+    $('#emptyState').hidden = false;
+    document.body.classList.add('is-empty');
+  },
 
   /** Show a friendly error card. Pass null to clear. */
   setError(error, { retry = null } = {}) {
@@ -605,15 +717,20 @@ const Player = {
     const v = this.video;
     const err = v.error;
     if (!err) return;
+    // Stream libraries report their own fatal errors.
+    if (StreamEngine.hls || StreamEngine.dash) { console.warn('[player] media error while streaming', err); return; }
+    const item = this.current;
+    // Remote progressive files get a blob-fallback + a clearer message.
+    if (item && item.kind === 'remote' && !isStreamType(item.type || detectType(item.url))) {
+      return;
+    }
     const map = {
       1: { title: 'Playback aborted', detail: 'The media download was aborted.' },
-      2: { title: 'Network error', detail: 'The video could not be fetched. Check the URL, CORS headers and your connection.' },
+      2: { title: 'Network error', detail: 'The video could not be fetched. Check the URL and your connection.' },
       3: { title: 'Decoding error', detail: 'The file could not be decoded. The container or codec may be unsupported (try MP4/H.264 or WebM/VP9).' },
       4: { title: 'Format not supported', detail: 'This browser cannot play this source directly. Try HLS/DASH or a different file.' },
     };
     const info = map[err.code] || { title: 'Playback error', detail: err.message || 'Unknown media error.' };
-    // Only surface errors for the active source (stream libraries manage their own).
-    if (StreamEngine.hls || StreamEngine.dash) { console.warn('[player] media error while streaming', err); return; }
     this.setError(info, { retry: () => this.current && this.load(this.current, { force: true }) });
   },
 
@@ -639,9 +756,12 @@ const Player = {
     StreamEngine.destroy();
     this.setError(null);
     this.hideEmptyState();
-    this.showSpinner();
-
+    this._hasPlayed = false;
+    this._muteFlash = true; // don't flash pause while tearing down the previous source
+    this._loadGen = (this._loadGen || 0) + 1;
+    const loadGen = this._loadGen;
     this.current = item;
+    this.showSpinner();
     Playlist.markCurrent(item.id);
     UI.renderCurrentTitle(item);
     MediaSession.setMetadata(item);
@@ -678,6 +798,7 @@ const Player = {
       });
 
       if (!result.ok) {
+        this._muteFlash = false;
         this.setError({ title: `${type.toUpperCase()} could not be loaded`, detail: result.error },
           { retry: () => this.load(item, { force: true }) });
         return;
@@ -685,17 +806,18 @@ const Player = {
       UI.setBadge(type === 'hls' ? 'HLS' : 'DASH');
       v.addEventListener('loadedmetadata', applyResume, { once: true });
     } else {
+      try { v.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
+      v.removeAttribute('crossorigin');
       v.src = src;
       v.preload = 'auto';
       UI.setBadge(item.kind === 'file' ? 'LOCAL' : (item.kind === 'offline' ? 'OFFLINE' : 'FILE'));
       v.addEventListener('loadedmetadata', applyResume, { once: true });
-      // Progressive files: surface a clear error if the server refuses.
+      // Progressive files: try a CORS blob fallback, then a clear error.
       if (item.kind === 'remote') {
+        item._blobTried = false;
         v.addEventListener('error', () => {
-          this.setError({
-            title: 'Cannot load this video',
-            detail: 'The URL may be wrong, the host unreachable, or CORS/Referer rules may block direct playback. Opening it in a new tab is a quick check.',
-          }, { retry: () => this.load(item, { force: true }) });
+          if (loadGen !== this._loadGen || this.current !== item) return;
+          this._onRemoteError(item);
         }, { once: true });
       }
     }
@@ -706,14 +828,62 @@ const Player = {
     Subtitles.attachItemTracks(item);
     Subtitles.detectSidecars(item).catch(() => { /* optional */ });
 
+    this._muteFlash = false;
     if (autoplay) this.play();
     else this.updatePlayButton();
   },
 
+  /**
+   * Remote progressive playback failed. Try fetching the file as a blob
+   * (helps when the <video> request was blocked by Referer but CORS allows
+   * a no-referrer fetch). Then surface a specific error.
+   */
+  async _onRemoteError(item) {
+    if (!item || this.current !== item) return;
+    if (!item._blobTried && item.url && /^https?:/i.test(item.url)) {
+      item._blobTried = true;
+      try {
+        const res = await fetch(item.url, {
+          mode: 'cors',
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob && blob.size > 0) {
+            const obj = URL.createObjectURL(blob);
+            this.objectUrls.add(obj);
+            item.objectUrl = obj;
+            this.video.src = obj;
+            this.play();
+            return;
+          }
+        }
+      } catch { /* CORS fetch failed too — fall through to the error card */ }
+    }
+    this.hideSpinner();
+    this.setError(this._remoteErrorInfo(item), {
+      retry: () => { item._blobTried = false; this.load(item, { force: true }); },
+    });
+  },
+
+  _remoteErrorInfo(item) {
+    const hint = unplayableHint(item && item.url);
+    return {
+      title: 'Cannot load this video',
+      detail: hint || 'The URL may be wrong, the host unreachable, or the file is not a direct video stream. Use an MP4/WebM file, an .m3u8 HLS playlist, or an .mpd DASH manifest — watch pages cannot be played.',
+    };
+  },
+
   updatePlayButton() {
-    const playing = !this.video.paused && !this.video.ended;
+    const v = this.video;
+    const playing = !v.paused && !v.ended;
     $('#btnPlay').setAttribute('aria-label', playing ? 'Pause' : 'Play');
-    Controls.showBigPlay(!playing && (this.video.paused || this.video.ended));
+    // Persistent center play only before the first successful play (or after
+    // ended, so the user can tap to replay). Mid-playback pause uses the 1s flash.
+    const showCenter = !playing && !!this.current && (!this._hasPlayed || v.ended);
+    Controls.showBigPlay(showCenter);
   },
 
   /** End of the current item: honour loop-one / loop-all / shuffle. */
@@ -938,12 +1108,24 @@ const Controls = {
     node.classList.remove('show'); void node.offsetWidth; node.classList.add('show');
   },
 
-  /** Brief play/pause icon flash (double-tap gesture feedback). */
+  /** Brief play/pause icon flash (~1 second, then gone). */
   flashGesture(playing, label = '') {
     const node = $('#gestureFlash');
-    $('#gestureFlashIcon').firstElementChild.setAttribute('href', playing ? '#i-play' : '#i-pause');
-    node.dataset.label = label;
-    node.classList.remove('show'); void node.offsetWidth; node.classList.add('show');
+    if (!node) return;
+    const use = $('#gestureFlashIcon') && $('#gestureFlashIcon').querySelector('use');
+    if (use) use.setAttribute('href', playing ? '#i-play' : '#i-pause');
+    node.dataset.label = label || '';
+    node.classList.remove('out');
+    node.classList.remove('show');
+    void node.offsetWidth;
+    node.classList.add('show');
+    clearTimeout(this._flashTimer);
+    this._flashTimer = setTimeout(() => {
+      node.classList.add('out');
+      this._flashTimer = setTimeout(() => {
+        node.classList.remove('show', 'out');
+      }, 220);
+    }, 1000);
   },
 
   async toggleFullscreen() {
@@ -971,16 +1153,12 @@ const Controls = {
     }
   },
 
-  /* ---- auto-hide the control bar while playing (mouse users) ---- */
-  scheduleAutoHide() {
-    clearTimeout(this.hideTimer);
-    if (Player.video.paused) return;
-    this.hideTimer = setTimeout(() => this.setBarVisible(false), 3200);
-  },
+  /* Chrome is toggled by a single tap — no auto-hide, no mouse-move reveal. */
+  scheduleAutoHide() { clearTimeout(this.hideTimer); },
   setBarVisible(visible) {
     $('#controlsBar').classList.toggle('is-hidden', !visible);
     document.body.classList.toggle('controls-hidden', !visible);
-    if (visible) this.scheduleAutoHide();
+    clearTimeout(this.hideTimer);
   },
   toggleBar() { this.setBarVisible($('#controlsBar').classList.contains('is-hidden')); },
 };
@@ -1098,6 +1276,8 @@ const Gestures = {
     stage.addEventListener('dblclick', (e) => {
       if (Gestures.isInteractive(e.target)) return;
       e.preventDefault();
+      clearTimeout(Gestures.singleTapTimer);
+      Gestures.singleTapTimer = null;
       Gestures.handleDoubleTap(e.clientX);
     });
 
@@ -1105,11 +1285,13 @@ const Gestures = {
       // Ignore clicks synthesised by touch (they follow touchend).
       if (performance.now() - Gestures.lastTouchEnd < 800) return;
       if (Gestures.isInteractive(e.target)) return;
-      Gestures.handleSingleTap();
+      // Delay so a double-click can cancel the chrome toggle.
+      clearTimeout(Gestures.singleTapTimer);
+      Gestures.singleTapTimer = setTimeout(() => {
+        Gestures.singleTapTimer = null;
+        Gestures.handleSingleTap();
+      }, Gestures.DOUBLE_TAP_MS + 20);
     });
-
-    // Mouse moving over the stage reveals the control bar again.
-    stage.addEventListener('pointermove', () => Controls.setBarVisible(true));
 
     /* ---------- Drag & drop of files over the stage ---------- */
     DragDrop.bindStage(stage);
@@ -1144,12 +1326,12 @@ const Gestures = {
     if (zone === 'left') { Player.seekBy(-10); return; }
     if (zone === 'right') { Player.seekBy(10); return; }
 
-    // Read the state *before* toggling so the feedback icon matches the result.
-    const wasPaused = Player.video.paused;
+    // Silent play/pause: no overlay icons and no control-bar reveal.
+    Player._muteFlash = true;
     Player.togglePlay();
-    Controls.flashGesture(wasPaused, wasPaused ? 'Playing' : 'Paused');
-    Controls.setBarVisible(true);
-    Controls.scheduleAutoHide();
+    Player._muteFlash = false;
+    const flash = $('#gestureFlash');
+    if (flash) flash.classList.remove('show', 'out');
   },
 
   /** Single tap toggles the control bar visibility. */
@@ -2230,9 +2412,10 @@ const Subtitles = {
 
 const Sources = {
   SAMPLES: [
-    { title: 'Big Buck Bunny (MP4, progressive)', url: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4' },
-    { title: 'Big Buck Bunny (HLS, Apple sample)', url: 'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8' },
-    { title: 'DASH-IF live-ish sample (MPD)', url: 'https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd' },
+    { title: 'Sintel trailer (MP4, progressive)', url: 'https://media.w3.org/2010/05/sintel/trailer.mp4' },
+    { title: 'Big Buck Bunny (MP4, Google sample)', url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4' },
+    { title: 'Bipbop (HLS, Apple sample)', url: 'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8' },
+    { title: 'DASH-IF sample (MPD)', url: 'https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd' },
   ],
 
   init() {
@@ -2262,11 +2445,15 @@ const Sources = {
     // Tolerate a missing protocol ("example.com/video.mp4")
     if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
       value = (/^(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})/i.test(value) ? 'http://' : 'https://') + value;
-      input.value = value;
     }
+    value = rewriteMediaUrl(value);
+    input.value = value;
     let parsed;
     try { parsed = new URL(value); } catch { Toast.err('That does not look like a valid URL'); return; }
     if (!/^https?:$/.test(parsed.protocol)) { Toast.err('Only http(s) URLs can be played from the network'); return; }
+
+    const blocked = unplayableHint(value);
+    if (blocked) { Toast.err(blocked); return; }
 
     const type = detectType(value, 'progressive');
     const item = {
@@ -2485,11 +2672,7 @@ const Shell = {
 
   togglePanel() {
     const sidebar = $('#sidebar');
-    if (this.isMobilePanel()) {
-      sidebar.classList.contains('open') ? this.closePanel() : this.openPanel();
-    } else {
-      $('#layout').classList.toggle('sidebar-hidden');
-    }
+    sidebar.classList.contains('open') ? this.closePanel() : this.openPanel();
   },
 
   openPanel() {
