@@ -9,12 +9,13 @@
  *   • theme, volume, speed and playlist persistence in localStorage
  *
  * Module map (search for the banner numbers):
- *   01 Utilities          07 StreamEngine (hls.js / dash.js)
- *   02 Persistence        08 Player (core playback)
- *   03 UI helpers         09 Gestures  |  10 Keyboard
- *   04 Toast / dialogs    11 Playlist  |  12 Offline (downloads)
- *   05 Media helpers      13 Subtitles |  14 Online subtitle search
- *   06 Sources/theme      15 Shell     |  16 UI |  17 Boot
+ *   01 Utilities          07 MediaSession
+ *   02 Persistence        08 Controls
+ *   03 UI helpers         09 Menus       | 10 Gestures
+ *   04 Media helpers      11 Keyboard    | 12 Playlist
+ *   05 StreamEngine       13 Offline     | 14 Subtitles
+ *   06 Player             15 SubtitleSearch
+ *   16 Sources + MovieSearch | 17 Theme | 18 Shell | 19 UI | 20 Boot
  * ===================================================================== */
 
 'use strict';
@@ -1031,7 +1032,7 @@ const Controls = {
 
     /* --- empty state quick actions --- */
     $('#btnEmptyLocal').addEventListener('click', (e) => { e.stopPropagation(); $('#fileInput').click(); });
-    $('#btnEmptyScan').addEventListener('click', (e) => { e.stopPropagation(); Sources.scanWebsite(); });
+    $('#btnEmptySearch').addEventListener('click', (e) => { e.stopPropagation(); MovieSearch.open(); });
 
     /* --- fullscreen state --- */
     document.addEventListener('fullscreenchange', () => {
@@ -1224,46 +1225,24 @@ const Menus = {
 const Gestures = {
   DOUBLE_TAP_MS: 300,
   MOVE_TOLERANCE: 60,      // px — a "tap" must not move much
+  SWIPE_THRESHOLD: 36,     // px — lock to seek/volume after deliberate movement
+  SEEK_SECONDS_PER_PIXEL: 0.1,
   lastTouchEnd: 0,
   lastTap: { time: 0, x: 0, y: 0 },
   singleTapTimer: null,
+  gestureHudTimer: null,
+  touchStart: null,
+  touchGesture: null,
+  ignoreTouchEnd: false,
 
   init() {
     const stage = $('#playerStage');
 
     /* ---------- Touch (mobile / tablets) ---------- */
-    stage.addEventListener('touchend', (e) => {
-      if (e.touches.length > 0) return;                 // fingers still down = pinch/drag
-      if (Gestures.isInteractive(e.target)) return;     // never hijack control-bar taps
-      const touch = e.changedTouches[0];
-      const now = performance.now();
-      Gestures.lastTouchEnd = now;
-
-      const isDouble = (now - Gestures.lastTap.time) <= Gestures.DOUBLE_TAP_MS &&
-        Math.hypot(touch.clientX - Gestures.lastTap.x, touch.clientY - Gestures.lastTap.y) <= Gestures.MOVE_TOLERANCE;
-
-      if (isDouble) {
-        clearTimeout(Gestures.singleTapTimer);          // cancel the pending single-tap action
-        Gestures.singleTapTimer = null;
-        Gestures.lastTap.time = 0;
-        Gestures.handleDoubleTap(touch.clientX);
-      } else {
-        Gestures.lastTap = { time: now, x: touch.clientX, y: touch.clientY };
-        // Delay the single-tap action so a second tap can cancel it.
-        clearTimeout(Gestures.singleTapTimer);
-        Gestures.singleTapTimer = setTimeout(() => {
-          Gestures.singleTapTimer = null;
-          Gestures.handleSingleTap();
-        }, Gestures.DOUBLE_TAP_MS + 20);
-      }
-    }, { passive: true });
-
-    // Stop the browser's own double-tap zoom / text selection inside the stage.
-    stage.addEventListener('touchstart', (e) => {
-      if (e.touches.length > 1) return;
-      // Only prevent default when the gesture starts on the video itself.
-      if (!Gestures.isInteractive(e.target)) e.preventDefault();
-    }, { passive: false });
+    stage.addEventListener('touchstart', (e) => this.handleTouchStart(e), { passive: false });
+    stage.addEventListener('touchmove', (e) => this.handleTouchMove(e), { passive: false });
+    stage.addEventListener('touchend', (e) => this.handleTouchEnd(e), { passive: true });
+    stage.addEventListener('touchcancel', () => this.cancelTouchGesture(), { passive: true });
 
     /* ---------- Mouse (desktop) ---------- */
     stage.addEventListener('dblclick', (e) => {
@@ -1288,6 +1267,165 @@ const Gestures = {
 
     /* ---------- Drag & drop of files over the stage ---------- */
     DragDrop.bindStage(stage);
+  },
+
+  handleTouchStart(e) {
+    if (e.touches.length > 1) {
+      this.ignoreTouchEnd = true;
+      this.touchStart = null;
+      this.touchGesture = null;
+      clearTimeout(this.singleTapTimer);
+      this.singleTapTimer = null;
+      this.hideGestureHud(0);
+      return;
+    }
+    if (this.ignoreTouchEnd || this.isInteractive(e.target)) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    this.touchStart = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY, target: e.target };
+    this.touchGesture = null;
+    // Suppress browser panning/zoom only when the gesture starts on the stage.
+    if (e.cancelable) e.preventDefault();
+  },
+
+  handleTouchMove(e) {
+    if (!this.touchStart || this.ignoreTouchEnd) return;
+    if (e.touches.length > 1) {
+      this.ignoreTouchEnd = true;
+      this.touchStart = null;
+      this.touchGesture = null;
+      this.hideGestureHud(0);
+      return;
+    }
+    const touch = e.touches[0];
+    if (!touch || touch.identifier !== this.touchStart.identifier) return;
+    const dx = touch.clientX - this.touchStart.x;
+    const dy = touch.clientY - this.touchStart.y;
+
+    if (!this.touchGesture) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < this.SWIPE_THRESHOLD) return;
+      const video = Player.video;
+      this.touchGesture = {
+        axis: Math.abs(dx) >= Math.abs(dy) ? 'seek' : 'volume',
+        startX: this.touchStart.x,
+        startY: this.touchStart.y,
+        startTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        startVolume: video.muted ? 0 : video.volume,
+      };
+      // A swipe must never fall through to a single/double-tap action.
+      clearTimeout(this.singleTapTimer);
+      this.singleTapTimer = null;
+      this.lastTap.time = 0;
+    }
+
+    if (e.cancelable) e.preventDefault();
+    this.updateTouchGesture(touch.clientX, touch.clientY);
+  },
+
+  handleTouchEnd(e) {
+    if (e.touches.length > 0) return; // fingers still down = pinch
+    const now = performance.now();
+    this.lastTouchEnd = now;
+    if (this.ignoreTouchEnd) {
+      this.ignoreTouchEnd = false;
+      this.touchStart = null;
+      this.touchGesture = null;
+      this.lastTap.time = 0;
+      return;
+    }
+
+    const touch = e.changedTouches[0];
+    if (this.touchGesture) {
+      if (touch) this.updateTouchGesture(touch.clientX, touch.clientY);
+      this.touchGesture = null;
+      this.touchStart = null;
+      this.lastTap.time = 0;
+      this.hideGestureHud(650);
+      return;
+    }
+
+    const start = this.touchStart;
+    this.touchStart = null;
+    if (this.isInteractive(e.target) || (start && this.isInteractive(start.target)) || !touch) return;
+
+    const isDouble = (now - this.lastTap.time) <= this.DOUBLE_TAP_MS &&
+      Math.hypot(touch.clientX - this.lastTap.x, touch.clientY - this.lastTap.y) <= this.MOVE_TOLERANCE;
+
+    if (isDouble) {
+      clearTimeout(this.singleTapTimer);
+      this.singleTapTimer = null;
+      this.lastTap.time = 0;
+      this.handleDoubleTap(touch.clientX);
+    } else {
+      this.lastTap = { time: now, x: touch.clientX, y: touch.clientY };
+      // Delay the single-tap action so a second tap can cancel it.
+      clearTimeout(this.singleTapTimer);
+      this.singleTapTimer = setTimeout(() => {
+        this.singleTapTimer = null;
+        this.handleSingleTap();
+      }, this.DOUBLE_TAP_MS + 20);
+    }
+  },
+
+  updateTouchGesture(clientX, clientY) {
+    const gesture = this.touchGesture;
+    if (!gesture) return;
+    if (gesture.axis === 'seek') {
+      const video = Player.video;
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        this.showGestureHud('seek', 'Seek unavailable', 'right');
+        return;
+      }
+      const target = clamp(
+        gesture.startTime + (clientX - gesture.startX) * this.SEEK_SECONDS_PER_PIXEL,
+        0,
+        Math.max(0, video.duration - 0.05)
+      );
+      Player.seekTo(target);
+      Controls.renderProgress();
+      const delta = target - gesture.startTime;
+      const label = `${delta >= 0 ? '+' : '−'}${Math.round(Math.abs(delta))}s`;
+      this.showGestureHud('seek', label, delta >= 0 ? 'right' : 'left');
+      return;
+    }
+
+    const stageHeight = $('#playerStage').getBoundingClientRect().height || 240;
+    const target = clamp(gesture.startVolume - (clientY - gesture.startY) / Math.max(stageHeight, 180), 0, 1);
+    Player.setVolume(target);
+    this.showGestureHud('volume', `${Math.round((Player.video.muted ? 0 : Player.video.volume) * 100)}%`);
+  },
+
+  showGestureHud(kind, label, direction = 'right') {
+    const hud = $('#gestureHud');
+    const use = hud.querySelector('use');
+    const symbol = kind === 'volume' ? '#i-vol-high' : direction === 'left' ? '#i-prev' : '#i-next';
+    use.setAttribute('href', symbol);
+    $('#gestureHudLabel').textContent = label;
+    hud.hidden = false;
+    hud.setAttribute('aria-hidden', 'false');
+    clearTimeout(this.gestureHudTimer);
+  },
+
+  hideGestureHud(delay = 0) {
+    clearTimeout(this.gestureHudTimer);
+    const hide = () => {
+      const hud = $('#gestureHud');
+      if (!hud) return;
+      hud.hidden = true;
+      hud.setAttribute('aria-hidden', 'true');
+    };
+    if (delay > 0) this.gestureHudTimer = setTimeout(hide, delay);
+    else hide();
+  },
+
+  cancelTouchGesture() {
+    this.touchStart = null;
+    this.touchGesture = null;
+    this.ignoreTouchEnd = false;
+    this.lastTap.time = 0;
+    clearTimeout(this.singleTapTimer);
+    this.singleTapTimer = null;
+    this.hideGestureHud(0);
   },
 
   /** True when the event target is part of the interactive UI (never gesture). */
@@ -1326,10 +1464,8 @@ const Gestures = {
   /** Single tap toggles the control bar visibility. */
   handleSingleTap() {
     const hidden = $('#controlsBar').classList.contains('is-hidden');
-    Controls.setBarVisible(hidden);        // hidden → show, visible → hide
-    if (!hidden) {                          // hiding: clear any pending auto-hide timer
-      clearTimeout(Controls.hideTimer);
-    }
+    Controls.setBarVisible(hidden);
+    if (!hidden) clearTimeout(Controls.hideTimer);
   },
 };
 
@@ -3285,7 +3421,7 @@ const Sources = {
       this.loadFromInput({ play: true });
     });
     $('#btnQueueUrl').addEventListener('click', (e) => { e.preventDefault(); this.loadFromInput({ play: false }); });
-    $('#btnScanSite').addEventListener('click', () => this.scanWebsite());
+    $('#btnSearchMovies').addEventListener('click', () => MovieSearch.open({ query: MovieSearch.queryFromUrlInput() }));
 
     /* Local files */
     $('#btnAddLocal').addEventListener('click', () => $('#fileInput').click());
@@ -3488,36 +3624,322 @@ const Sources = {
     });
   },
 
-  /** Scan the URL field as a web page, even when its path looks like a media file. */
-  scanWebsite() {
-    const input = $('#urlInput');
-    let value = input.value.trim();
-    if (!value) {
-      // On small screens the URL field may be hidden in the panel. Open it so
-      // the user can paste a website before trying again.
-      Shell.openPanel();
-      input.focus();
-      Toast.warn('Paste a website URL first');
-      return;
-    }
-
-    if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
-      value = (/^(localhost|127\.0\.0\.1|\[::1\]|(\d{1,3}\.){3}\d{1,3})/i.test(value) ? 'http://' : 'https://') + value;
-    }
-    input.value = value;
-    let parsed;
-    try { parsed = new URL(value); } catch { Toast.err('That does not look like a valid website URL'); return; }
-    if (!/^https?:$/.test(parsed.protocol)) { Toast.err('Only http(s) websites can be scanned'); return; }
-
-    this.scanPageForVideos(value, { play: true });
-  },
-
   loadSample() {
     const next = this.SAMPLES[this._sampleIdx || 0];
     this._sampleIdx = ((this._sampleIdx || 0) + 1) % this.SAMPLES.length;
     $('#urlInput').value = next.url;
     Toast.show(`Sample needs internet: ${next.title}`, 'info', 3000);
     this.loadFromInput({ play: true });
+  },
+};
+
+/* ------------------------------------------------------------------
+ * Movie title search — Internet Archive's openly licensed catalog only.
+ * Search metadata is checked before a direct video file is offered; the
+ * Archive item page and declared license remain visible for verification.
+ * ---------------------------------------------------------------- */
+const MovieSearch = {
+  SEARCH_URL: 'https://archive.org/advancedsearch.php',
+  METADATA_URL: 'https://archive.org/metadata/',
+  MAX_LOOKUPS: 24,
+  MAX_RESULTS: 10,
+  LOOKUP_CONCURRENCY: 4,
+  searchToken: 0,
+  controller: null,
+  timeoutId: null,
+  lastQuery: '',
+
+  init() {
+    $('#movieSearchForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.search();
+    });
+    $('#btnMovieSearchClose').addEventListener('click', () => this.close());
+    $('#btnMovieSearchCancel').addEventListener('click', () => this.close());
+    $('#movieSearchDialog').addEventListener('close', () => this.cancelPending());
+  },
+
+  /** A non-URL typed into the online-video field is a handy search prefill. */
+  queryFromUrlInput() {
+    const raw = String($('#urlInput')?.value || '').trim();
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw) || /^(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?::\d+)?(?:\/|$)/i.test(raw)) return '';
+    return raw;
+  },
+
+  open({ query } = {}) {
+    const field = $('#movieSearchQuery');
+    const initial = String(query ?? this.queryFromUrlInput() ?? '').trim() || this.lastQuery;
+    field.value = initial.slice(0, 120);
+    $('#movieSearchResults').replaceChildren();
+    this.setStatus('Enter a title to search public-domain and Creative Commons movie files.');
+    Shell.openDialog('#movieSearchDialog');
+    setTimeout(() => field.focus?.(), 60);
+  },
+
+  close() {
+    const dialog = $('#movieSearchDialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else {
+      dialog.removeAttribute('open');
+      this.cancelPending();
+    }
+  },
+
+  cancelPending() {
+    this.searchToken++;
+    this.controller?.abort();
+    this.controller = null;
+    if (this.timeoutId) clearTimeout(this.timeoutId);
+    this.timeoutId = null;
+    const button = $('#btnMovieSearchGo');
+    if (button) button.disabled = false;
+  },
+
+  setStatus(text, kind = '') {
+    const status = $('#movieSearchStatus');
+    status.textContent = text;
+    status.classList.toggle('is-busy', kind === 'busy');
+    status.classList.toggle('is-warn', kind === 'warn');
+  },
+
+  /** Quote a title as one Lucene phrase before URLSearchParams encodes it. */
+  quotePhrase(value) {
+    return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  },
+
+  searchUrl(query) {
+    const params = new URLSearchParams();
+    params.set('q', `title:${this.quotePhrase(query)} AND mediatype:movies AND licenseurl:*`);
+    ['identifier', 'title', 'year', 'creator', 'licenseurl', 'mediatype'].forEach((field) => params.append('fl[]', field));
+    params.set('rows', String(this.MAX_LOOKUPS));
+    params.set('page', '1');
+    params.set('sort[]', 'downloads desc');
+    params.set('output', 'json');
+    return `${this.SEARCH_URL}?${params.toString()}`;
+  },
+
+  /** Only accept Creative Commons and public-domain license URLs. */
+  licenseInfo(raw) {
+    const value = Array.isArray(raw) ? raw.find((v) => typeof v === 'string') : raw;
+    if (typeof value !== 'string' || !value.trim()) return null;
+    let url;
+    try { url = new URL(value.trim()); } catch { return null; }
+    if (!/^https?:$/.test(url.protocol) || !/^(?:www\.)?creativecommons\.org$/i.test(url.hostname)) return null;
+    const path = url.pathname.toLowerCase();
+    const isPublicDomain = path.startsWith('/publicdomain/') || /^\/licenses\/publicdomain(?:\/|$)/.test(path);
+    const isCreativeCommons = /^\/licenses\/[a-z0-9][a-z0-9-]*(?:\/|$)/.test(path);
+    if (!isPublicDomain && !isCreativeCommons) return null;
+    return {
+      url: url.href,
+      label: isPublicDomain ? 'Public domain · uploader-marked' : 'Creative Commons · uploader-marked',
+    };
+  },
+
+  /** Choose a likely browser-playable video file, preferring MP4/WebM. */
+  videoFile(files) {
+    const accepted = new Set(['mp4', 'm4v', 'mov', 'webm', 'ogv', 'ogg', 'mkv']);
+    const priority = { mp4: 0, webm: 1, m4v: 2, mov: 3, ogv: 4, ogg: 5, mkv: 6 };
+    return (Array.isArray(files) ? files : Object.values(files || {}))
+      .filter((file) => file && typeof file.name === 'string' && file.source !== 'metadata')
+      .map((file) => {
+        const name = file.name.trim();
+        const ext = name.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || '';
+        return { ...file, name, ext };
+      })
+      .filter((file) => accepted.has(file.ext)
+        && !file.name.startsWith('/')
+        && !file.name.split('/').some((part) => !part || part === '.' || part === '..'))
+      .sort((a, b) => priority[a.ext] - priority[b.ext])[0] || null;
+  },
+
+  directFileUrl(identifier, fileName) {
+    const path = fileName.split('/').map((part) => encodeURIComponent(part)).join('/');
+    return `https://archive.org/download/${encodeURIComponent(identifier)}/${path}`;
+  },
+
+  async fetchJson(url, signal) {
+    const response = await fetch(url, {
+      credentials: 'omit', redirect: 'follow', referrerPolicy: 'no-referrer', signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  },
+
+  async resolveHit(hit, signal) {
+    const identifier = String(hit?.identifier || '').trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,199}$/i.test(identifier)) return null;
+    const record = await this.fetchJson(`${this.METADATA_URL}${encodeURIComponent(identifier)}`, signal);
+    const metadata = record?.metadata || {};
+    if (metadata.mediatype && String(metadata.mediatype).toLowerCase() !== 'movies') return null;
+
+    const license = this.licenseInfo(metadata.licenseurl || hit.licenseurl);
+    if (!license) return null;
+    const file = this.videoFile(record.files);
+    if (!file) return null;
+
+    const title = String(metadata.title || hit.title || identifier).trim().slice(0, 180) || identifier;
+    const year = String(metadata.year || hit.year || '').match(/\b\d{4}\b/)?.[0] || '';
+    const creatorValue = metadata.creator || hit.creator || '';
+    const creator = (Array.isArray(creatorValue) ? creatorValue.join(', ') : String(creatorValue))
+      .replace(/\s+/g, ' ').trim().slice(0, 100);
+    const url = this.directFileUrl(identifier, file.name);
+    return {
+      identifier,
+      title,
+      year,
+      creator,
+      license,
+      fileName: file.name,
+      fileSize: Number(file.size) || 0,
+      url,
+      type: detectType(url, 'progressive'),
+      detailsUrl: `https://archive.org/details/${encodeURIComponent(identifier)}`,
+    };
+  },
+
+  async resolveHits(hits, signal) {
+    const unique = [];
+    const seen = new Set();
+    for (const hit of hits.slice(0, this.MAX_LOOKUPS)) {
+      const id = String(hit?.identifier || '');
+      if (id && !seen.has(id)) { seen.add(id); unique.push(hit); }
+    }
+    const resolved = new Array(unique.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < unique.length && !signal.aborted) {
+        const index = next++;
+        try { resolved[index] = await this.resolveHit(unique[index], signal); }
+        catch (err) {
+          if (signal.aborted) return;
+          console.warn('[movie-search] skipped an unreadable Archive record', err);
+          resolved[index] = null;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.LOOKUP_CONCURRENCY, unique.length) }, worker));
+    return resolved.filter(Boolean).slice(0, this.MAX_RESULTS);
+  },
+
+  async search() {
+    const field = $('#movieSearchQuery');
+    const query = String(field.value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (!query) {
+      this.setStatus('Enter a movie name to search.', 'warn');
+      field.focus();
+      return;
+    }
+    if (navigator.onLine === false) {
+      this.setStatus('You are offline — movie search needs an internet connection.', 'warn');
+      return;
+    }
+
+    this.controller?.abort();
+    if (this.timeoutId) clearTimeout(this.timeoutId);
+    this.timeoutId = null;
+    const controller = new AbortController();
+    this.controller = controller;
+    const token = ++this.searchToken;
+    this.lastQuery = query;
+    field.value = query;
+    $('#movieSearchResults').replaceChildren();
+    $('#btnMovieSearchGo').disabled = true;
+    this.setStatus(`Searching Internet Archive for “${query}”…`, 'busy');
+    this.timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const data = await this.fetchJson(this.searchUrl(query), controller.signal);
+      const hits = data?.response?.docs;
+      if (!Array.isArray(hits)) throw new Error('Unexpected search response');
+      const movies = await this.resolveHits(hits, controller.signal);
+      if (token !== this.searchToken) return;
+      if (controller.signal.aborted) {
+        this.setStatus('Search timed out or was cancelled. Try again.', 'warn');
+        return;
+      }
+      if (!movies.length) {
+        this.setStatus('No matching public-domain or Creative Commons item with a direct video file was found. Try another title or spelling.');
+        return;
+      }
+      this.renderResults(movies);
+      this.setStatus(`Found ${movies.length} direct video file${movies.length === 1 ? '' : 's'} on Internet Archive. Check each record’s license before streaming.`);
+    } catch (err) {
+      if (token !== this.searchToken) return;
+      if (controller.signal.aborted) this.setStatus('Search timed out or was cancelled. Try again.', 'warn');
+      else {
+        console.warn('[movie-search] search failed', err);
+        this.setStatus('Could not reach Internet Archive. Check your connection and try again.', 'warn');
+      }
+    } finally {
+      if (token === this.searchToken) {
+        if (this.timeoutId) clearTimeout(this.timeoutId);
+        this.timeoutId = null;
+        this.controller = null;
+        $('#btnMovieSearchGo').disabled = false;
+      }
+    }
+  },
+
+  renderResults(movies) {
+    const list = $('#movieSearchResults');
+    list.replaceChildren();
+    movies.forEach((movie) => {
+      const title = el('a', {
+        class: 'movie-result-title movie-result-link',
+        href: movie.detailsUrl,
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        text: movie.title,
+      });
+      const meta = el('div', { class: 'movie-result-meta' });
+      if (movie.year) meta.append(el('span', { class: 'tag', text: movie.year }));
+      if (movie.creator) meta.append(el('span', { text: `by ${movie.creator}` }));
+      const extension = movie.fileName.split('.').pop().toUpperCase();
+      const mediaText = `${extension} direct file${movie.fileSize ? ` · ${fmtBytes(movie.fileSize)}` : ''}`;
+      meta.append(el('span', { class: 'tag', text: mediaText }));
+      meta.append(el('a', {
+        class: 'tag license', href: movie.license.url, target: '_blank',
+        rel: 'noopener noreferrer', text: movie.license.label,
+      }));
+      meta.append(el('a', {
+        class: 'movie-result-link', href: movie.url, target: '_blank',
+        rel: 'noopener noreferrer', text: 'Open direct video',
+      }));
+      meta.append(el('a', {
+        class: 'movie-result-link', href: movie.detailsUrl, target: '_blank',
+        rel: 'noopener noreferrer', text: 'View record',
+      }));
+
+      const main = el('div', { class: 'movie-result-main' }, title, meta);
+      const actions = el('div', { class: 'movie-result-actions' });
+      const play = el('button', { class: 'btn btn-primary', type: 'button', 'data-action': 'play', 'aria-label': `Play ${movie.title}` }, icon('i-play'), 'Play');
+      play.addEventListener('click', () => this.playMovie(movie));
+      const queue = el('button', { class: 'btn', type: 'button', 'data-action': 'queue', 'aria-label': `Queue ${movie.title}` }, icon('i-plus'), 'Queue');
+      queue.addEventListener('click', () => this.queueMovie(movie));
+      actions.append(play, queue);
+      list.append(el('li', { class: 'movie-result' }, main, actions));
+    });
+  },
+
+  playlistItem(movie) {
+    return {
+      id: uid(), kind: 'remote', title: movie.title, url: movie.url, type: movie.type,
+    };
+  },
+
+  queueMovie(movie) {
+    const item = this.playlistItem(movie);
+    const alreadyQueued = Playlist.has(item);
+    const entry = Playlist.add(item, { silent: true });
+    Toast.show(alreadyQueued ? `Already in playlist: ${entry.title}` : `Queued: ${entry.title}`, alreadyQueued ? 'info' : 'ok', 2200);
+  },
+
+  playMovie(movie) {
+    const entry = Playlist.add(this.playlistItem(movie), { silent: true });
+    this.close();
+    Playlist.play(entry.id);
   },
 };
 
@@ -3655,8 +4077,8 @@ const Shell = {
 
     /* Zoom lock — the page must never zoom: pinch, Ctrl+wheel and iOS
        gesture events are all blocked here; the viewport meta in index.html
-       (maximum-scale=1, user-scalable=no) and `touch-action: pan-x pan-y`
-       in styles.css cover the rest. Text inputs are kept at 16px in CSS so
+       (maximum-scale=1, user-scalable=no) and stage/page `touch-action`
+       rules in styles.css cover the rest. Text inputs are kept at 16px in CSS so
        focusing a field never triggers the iOS type-to-zoom either. */
     const blockGesture = (e) => e.preventDefault();
     document.addEventListener('gesturestart', blockGesture);
@@ -3753,6 +4175,7 @@ const App = {
     Keyboard.init();
     Playlist.init();
     Sources.init();
+    MovieSearch.init();
     Shell.init();
     await Offline.init();
 

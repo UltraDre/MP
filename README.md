@@ -49,6 +49,9 @@ No frameworks, no build step, no bundler — open it from any static server and 
     automatically (`<video>`/`<source>` tags, `og:video` metadata, media links
     and URLs embedded in the page's scripts) and every video found is added
     to the playlist
+- **Movie search**: search Internet Archive by title for direct video files whose records declare a
+  public-domain or Creative Commons license. Results can be played or queued. This is a focused catalog
+  search, not a search of the whole web; license claims come from uploaders and should be verified.
 - **Local**: file picker, folder picker (sidecar `.vtt`/`.srt` subtitles are matched by filename),
   drag-and-drop onto the page, plus `Ctrl/Cmd+V` to paste a URL from the clipboard.
 - **Offline**: one click stores the current video (or every HLS/DASH segment) in the browser cache so it
@@ -143,7 +146,8 @@ The file is split into numbered sections so you can jump straight to what you ne
 | 13 | `Offline` | talking to the service worker, downloads UI |
 | 14 | `Subtitles` | VTT/SRT tracks, delay, embedded tracks |
 | 15 | `SubtitleSearch` | online search (OpenSubtitles/Stremio), `Net` fetch helper, proxies |
-| 16–18 | `Sources`, `Theme`, `Shell` | URL/local files, drag & drop, theme, panels, install |
+| 16 | `Sources`, `MovieSearch` | URL/local files, page scanning and Internet Archive movie search |
+| 17–18 | `Theme`, `Shell` | theme, network state, panels, dialogs, install |
 | 19–20 | `UI`, `App` | view helpers and boot sequence |
 
 ---
@@ -152,15 +156,19 @@ The file is split into numbered sections so you can jump straight to what you ne
 
 ### 1. Play an online video
 
-1. Paste the URL into **Online video** and press **Play** (or **Queue** to add it without playing).
-2. Paste a website URL and press **Scan site for videos** to find video files referenced by that page.
+1. Paste a direct media URL into **Online video** and press **Play** (or **Queue** to add it without playing).
+2. To look up a movie by name, choose **Search movies**, enter its title, then press **Play** on a result
+   (or **Queue** it). This searches Internet Archive's movie catalog for items marked public domain or
+   Creative Commons and offering a direct video file. It does **not** search the whole internet or
+   third-party subscription services. License labels are supplied by uploaders; open the record to
+   verify rights before streaming.
 3. Formats are detected from the URL. Progressive MP4/WebM files play without CORS.
    HLS/DASH playlists need CORS — see [Limitations](#limitations--known-constraints).
-4. Links that are **not** direct media files (ordinary web pages) are scanned automatically:
-   the app fetches the page, extracts every video it references (`<video>`/`<source>` tags,
-   `og:video` metadata, media links and URLs embedded in the page's scripts) and adds them all
-   to the playlist — pressing **Play** starts the first one found. Scanning needs the page's
-   host to allow cross-origin reads (CORS); watch pages that don't (YouTube, Vimeo, …) still
+4. Links that are **not** direct media files (ordinary web pages) are scanned automatically when
+   submitted in the Online video field: the app fetches the page, extracts every video it references
+   (`<video>`/`<source>` tags, `og:video` metadata, media links and URLs embedded in the page's scripts)
+   and adds them to the playlist — pressing **Play** starts the first one found. Scanning needs the
+   page's host to allow cross-origin reads (CORS); watch pages that don't (YouTube, Vimeo, …) still
    require a direct file/stream URL.
 
 You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
@@ -214,6 +222,8 @@ Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or
 
 | Gesture | Action |
 |---------|--------|
+| **Swipe left / right** across the video (mobile) | Seek backward / forward continuously (about 0.1 s per horizontal pixel) |
+| **Swipe up / down** across the video (mobile) | Raise / lower volume (a full stage-height swipe spans the volume range) |
 | **Double-tap** the video area (mobile) | Play / pause (completely silent — no icon or text is shown) |
 | **Double-click** the video area (desktop) | Play / pause (completely silent — no icon or text is shown) |
 | **Single tap / click** the video area | Show / hide the control bar |
@@ -224,11 +234,14 @@ Notes on the implementation:
 
 - Touch double-taps are detected from `touchend` timestamps: two taps within **300 ms** and within 60 px
   count as a double-tap (the same thresholds used by most mobile players).
+- A touch moving at least **36 px** locks to its dominant axis: horizontal movement seeks at about
+  **0.1 seconds per pixel**, while vertical movement changes volume relative to the player height.
+  A small on-video HUD shows the current seek offset or volume; swipes never trigger the tap actions.
 - Desktop uses the native `dblclick` event.
 - Every handler checks `event.target` first: taps on the control bar, buttons, sliders, playlist,
   URL input, dialogs or any `.card`/`.item` are **never** treated as gestures.
-- Page zoom is disabled everywhere (`maximum-scale=1, user-scalable=no` viewport, `touch-action:
-  pan-x pan-y`, plus JS guards against pinch / Ctrl+wheel / iOS gesture events), so taps never zoom —
+- Page zoom is disabled everywhere (`maximum-scale=1, user-scalable=no` viewport, touch-action
+  restrictions on the page and player stage, plus JS guards against pinch / Ctrl+wheel / iOS gesture events), so taps never zoom —
   including while typing in the URL field. The single-tap action is delayed by ~320 ms on touch so a
   second tap can cancel it.
 - Play/pause is completely silent — no overlay icon or text is shown; only seeks flash a "10s"
@@ -358,7 +371,9 @@ These are inherent to a browser-based player (no backend, no DRM):
    **page scan** still need `Access-Control-Allow-Origin`. Downloading cross-origin without CORS
    falls back to an opaque cache entry with limited seeking. Watch pages (YouTube, Vimeo, social)
    are not direct files, and their hosts block cross-origin reads, so the page scan cannot
-   extract their videos either — paste a direct file/stream URL.
+   extract their videos either — paste a direct file/stream URL. Movie-title search uses Internet
+   Archive's public catalog APIs only; it does not search commercial streaming services or the whole web.
+   Its license labels are uploader-provided and are not independently verified.
 2. **DRM / EME** — Widevine/PlayReady/FairPlay protected streams are not supported.
 3. **Live streams** — HLS/DASH live playlists can be played but not downloaded (there is no end).
 4. **DASH coverage** — `SegmentTemplate`, `SegmentTimeline`, `SegmentList` and `BaseURL` chains are
@@ -400,6 +415,8 @@ These are inherent to a browser-based player (no backend, no DRM):
 | Playback stutters for 4K files | The browser decodes in software; try a lower resolution or close other tabs. |
 | Nothing is stored after a while | The browser evicted the cache (storage pressure). Grant persistent storage when prompted and keep free disk space. |
 | Subtitles do not appear | Enable them in the CC panel; check the file is a valid `.vtt`/`.srt` (SRT is converted automatically). |
+| Movie search finds nothing | The search covers Internet Archive's movie catalog, not commercial streaming services or the whole web. Try the title's original spelling, or browse the Archive record for alternative names. Only records with a declared Creative Commons/public-domain license and a direct video file are shown. |
+| Movie search cannot connect | Check the connection and retry. The search reads Internet Archive's public JSON APIs directly; browser extensions or network filters may block those requests. |
 | Online subtitle search finds nothing | The name must match a release on OpenSubtitles — try a shorter title, clear the language filter or switch it to *Any language*. The status line names the source that failed and why. |
 | Search says “blocked by CORS” | The host refused the browser request. Enable **Retry blocked requests** in *More options* (uses a public proxy), or paste a direct subtitle link / load the file manually. |
 | OpenSubtitles.com (API key) returns “API key rejected” | The key is wrong or rate-limited. Remove it from *More options* to fall back to the free sources. |
@@ -431,7 +448,7 @@ The app itself needs **no build step and no dependencies**. Three optional harne
 node tests/static-checks.mjs          # ids, sprite references, asset paths, manifest, syntax sanity
 node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ranges, downloads
 npm install --no-save jsdom           # only for the UI test
-node tests/ui-smoke.test.mjs          # 90 checks: boots the real DOM and drives keyboard/gestures/playlist/page-scan/subtitle-search
+node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/gestures/playlist/movie-search/page-scan/subtitle-search
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest
@@ -440,9 +457,10 @@ node tests/ui-smoke.test.mjs          # 90 checks: boots the real DOM and drives
   a fake network and fake clients. It verifies HLS/DASH URL collection, byte accounting, range
   responses (`206` + `Content-Range`), aliasing, cancellation and cache cleanup.
 - `ui-smoke.test.mjs` boots `index.html` + `script.js` in jsdom with media-element stubs and exercises
-  shortcuts, gestures (including the touch double-tap timing), playlist reordering, subtitles,
-  the online subtitle search (with a mocked OpenSubtitles/Stremio backend, language filters and
-  one-click loading) and localStorage persistence.
+  shortcuts, gestures (including the touch double-tap timing), playlist reordering, movie search
+  (with mocked Internet Archive search/metadata and license filtering), subtitles, the online subtitle
+  search (with a mocked OpenSubtitles/Stremio backend, language filters and one-click loading) and
+  localStorage persistence.
 
 ---
 
@@ -450,6 +468,7 @@ node tests/ui-smoke.test.mjs          # 90 checks: boots the real DOM and drives
 
 - [hls.js](https://github.com/video-dev/hls.js) — HLS playback (Apache-2.0)
 - [dash.js](https://github.com/Dash-Industry-Forum/dash.js) — MPEG-DASH playback (BSD-3-Clause)
+- Movie title search uses Internet Archive's public [Advanced Search](https://archive.org/developers/search.html) and [Metadata](https://archive.org/developers/md-read.html) APIs. Movie files and item metadata remain hosted by their uploaders / the Archive.
 - Sample streams referenced in the app belong to their respective owners (W3C, Google, Apple, DASH-IF).
 - Online subtitle search talks to third-party services: [OpenSubtitles](https://www.opensubtitles.org)
   (legacy REST API and the official [opensubtitles.com](https://www.opensubtitles.com) API),

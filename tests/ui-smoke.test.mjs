@@ -107,6 +107,8 @@ check('speed grid populated (10 options)', document.querySelectorAll('#speedGrid
 check('theme applied to <html>', ['dark', 'light'].includes(document.documentElement.dataset.theme));
 check('PiP hidden in jsdom (unsupported)', $('#btnPip').hidden === true);
 check('empty state visible on first run', $('#emptyState').hidden === false);
+check('movie search replaced the scan-site controls', $('#btnEmptySearch') !== null && $('#btnSearchMovies') !== null
+  && $('#btnEmptyScan') === null && $('#btnScanSite') === null);
 check('buffering spinner is hidden on first run', $('#spinner').hidden === true);
 check('center play button is hidden until media is loaded', $('#bigPlay').hidden === true);
 
@@ -204,6 +206,34 @@ await wait(400); // single-tap delay (300ms) must not change playback
 check('single tap does not toggle playback', video.paused === pausedBeforeTap);
 touch(300, 200); touch(300, 200);
 check('double-tap toggles play/pause', video.paused !== pausedBeforeTap);
+
+// Directional swipes on the video seek horizontally and adjust volume vertically.
+stage.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 300, width: 400, height: 300 });
+const swipeTouch = (type, x, y) => {
+  const ev = new window.Event(type, { bubbles: true, cancelable: true });
+  const t = { identifier: 1, clientX: x, clientY: y, target: stage };
+  Object.defineProperty(ev, 'touches', { value: type === 'touchend' ? [] : [t] });
+  Object.defineProperty(ev, 'changedTouches', { value: [t] });
+  stage.dispatchEvent(ev);
+};
+const swipe = (x1, y1, x2, y2) => {
+  swipeTouch('touchstart', x1, y1);
+  swipeTouch('touchmove', x2, y2);
+  swipeTouch('touchend', x2, y2);
+};
+video._duration = 200;
+video.currentTime = 60;
+swipe(100, 150, 200, 150);
+check('swipe right seeks forward continuously', Math.abs(video.currentTime - 70) < 0.01, String(video.currentTime));
+check('seek swipe shows live feedback', $('#gestureHud').hidden === false && $('#gestureHudLabel').textContent === '+10s', $('#gestureHudLabel').textContent);
+swipe(200, 150, 150, 150);
+check('swipe left seeks backward continuously', Math.abs(video.currentTime - 65) < 0.01, String(video.currentTime));
+video.volume = 0.3;
+swipe(200, 150, 200, 90);
+check('swipe up raises volume', Math.abs(video.volume - 0.5) < 0.01, String(video.volume));
+check('volume swipe shows the new percentage', $('#gestureHudLabel').textContent === '50%', $('#gestureHudLabel').textContent);
+swipe(200, 90, 200, 150);
+check('swipe down lowers volume', Math.abs(video.volume - 0.3) < 0.01, String(video.volume));
 
 console.log('\n— playlist —');
 const urlInput = $('#urlInput');
@@ -384,6 +414,64 @@ await wait(120);
 check('download without SW warns instead of crashing', logs.errors.length === 0, logs.errors.join(' | '));
 check('download bar stays hidden', $('#downloadBar').hidden === true);
 
+console.log('\n— movie search —');
+$('#btnEmptySearch').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('empty-state Search movies opens the movie dialog', $('#movieSearchDialog').open === true);
+$('#btnMovieSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+urlInput.value = 'Public Domain Sample';
+$('#btnSearchMovies').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('movie name from the online field prefills search', $('#movieSearchQuery').value === 'Public Domain Sample', $('#movieSearchQuery').value);
+const movieSearchCalls = [];
+window.fetch = async (url) => {
+  const requestUrl = String(url);
+  movieSearchCalls.push(requestUrl);
+  if (requestUrl.startsWith('https://archive.org/advancedsearch.php?')) {
+    return {
+      ok: true,
+      json: async () => ({ response: { docs: [
+        { identifier: 'pd-sample', title: 'Public Domain Sample', year: '1920', mediatype: 'movies', licenseurl: 'http://creativecommons.org/publicdomain/mark/1.0/' },
+        { identifier: 'unlicensed-sample', title: 'Unlicensed Sample', mediatype: 'movies', licenseurl: '' },
+      ] } }),
+    };
+  }
+  if (requestUrl === 'https://archive.org/metadata/pd-sample') {
+    return {
+      ok: true,
+      json: async () => ({ metadata: {
+        title: 'Public Domain Sample', year: '1920', creator: 'Example Studio', mediatype: 'movies',
+        licenseurl: 'http://creativecommons.org/publicdomain/mark/1.0/',
+      }, files: [
+        { name: 'feature clip.mp4', size: '4096', format: 'MPEG4', source: 'derivative' },
+        { name: 'captions.srt', size: '300', format: 'SubRip', source: 'original' },
+      ] }),
+    };
+  }
+  if (requestUrl === 'https://archive.org/metadata/unlicensed-sample') {
+    return {
+      ok: true,
+      json: async () => ({ metadata: { title: 'Unlicensed Sample', mediatype: 'movies' }, files: [{ name: 'movie.mp4' }] }),
+    };
+  }
+  return { ok: false, status: 404, json: async () => ({}) };
+};
+$('#movieSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(100);
+const archiveSearchUrl = new URL(movieSearchCalls.find((url) => url.includes('advancedsearch.php')));
+check('movie search queries licensed Internet Archive movie titles', /mediatype:movies/.test(archiveSearchUrl.searchParams.get('q'))
+  && /licenseurl:\*/.test(archiveSearchUrl.searchParams.get('q')) && /title:/.test(archiveSearchUrl.searchParams.get('q')),
+  archiveSearchUrl.searchParams.get('q'));
+check('only a record with a declared CC/public-domain license is shown', document.querySelectorAll('#movieSearchResults .movie-result').length === 1,
+  String(document.querySelectorAll('#movieSearchResults .movie-result').length));
+check('movie result exposes its uploader-declared license', /Public domain/.test($('#movieSearchResults .license').textContent));
+check('movie result exposes a direct stream link', $('#movieSearchResults a[href^="https://archive.org/download/"]') !== null);
+$('#movieSearchResults [data-action="queue"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(300);
+const movieQueue = JSON.parse(window.localStorage.getItem('nebula.playlist.v1')).items;
+check('queued movie uses the direct encoded Internet Archive video URL', movieQueue.some((item) =>
+  item.title === 'Public Domain Sample' && item.url === 'https://archive.org/download/pd-sample/feature%20clip.mp4' && item.type === 'progressive'),
+  JSON.stringify(movieQueue.map((item) => ({ title: item.title, url: item.url, type: item.type }))));
+$('#btnMovieSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
 console.log('\n— page scanning —');
 window.fetch = async (url) => ({
   ok: true,
@@ -401,7 +489,7 @@ urlInput.value = 'https://site.example.com/watch/123';
 $('#urlForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 await wait(150);
 const scanTitles = [...document.querySelectorAll('#playlistList .item-title')].map((n) => n.textContent);
-check('page scan queued every video found on the page', document.querySelectorAll('#playlistList .item').length === 6,
+check('page scan queued every video found on the page', document.querySelectorAll('#playlistList .item').length === 7,
   JSON.stringify(scanTitles));
 await wait(300); // playlist save is debounced
 const scanUrls = JSON.parse(window.localStorage.getItem('nebula.playlist.v1')).items.map((i) => i.url);
@@ -417,7 +505,7 @@ submitUrl('https://cdn.example.com/direct.mp4');
 await wait(120);
 check('direct media links skip the scan', !fetchedUrls.includes('https://cdn.example.com/direct.mp4'),
   JSON.stringify(fetchedUrls));
-check('direct link was added to the playlist', document.querySelectorAll('#playlistList .item').length === 7,
+check('direct link was added to the playlist', document.querySelectorAll('#playlistList .item').length === 8,
   String(document.querySelectorAll('#playlistList .item').length));
 
 // a scan that fails (site blocks CORS) must not crash or add anything

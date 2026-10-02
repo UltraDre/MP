@@ -339,8 +339,8 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
   overflow: hidden;
   box-shadow: none;
   isolation: isolate;
-  /* Mobile: kill all page zoom (pan only), allow our own gestures */
-  touch-action: pan-x pan-y;
+  /* Let the player own single-finger swipe gestures (seek / volume). */
+  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
   cursor: pointer;
@@ -410,6 +410,19 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
   25% { opacity: 1; transform: scale(1); }
   100% { opacity: 0; transform: scale(1.15); }
 }
+
+/* Live feedback while a finger swipe is controlling seek or volume */
+.gesture-hud {
+  position: absolute; z-index: 6; left: 50%; top: 50%; translate: -50% -50%;
+  min-width: 116px; display: flex; flex-direction: column; align-items: center; gap: 7px;
+  padding: 14px 20px; border: 1px solid rgba(255, 255, 255, .2); border-radius: 15px;
+  background: rgba(8, 12, 24, .72); color: #fff; box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  pointer-events: none; user-select: none;
+}
+.gesture-hud[hidden] { display: none !important; }
+.gesture-hud svg { width: 30px; height: 30px; }
+.gesture-hud span { font-size: .9rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 /* Error + empty states */
 .error-box, .empty-state {
@@ -683,6 +696,36 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 .search-extra .search-row { margin-bottom: 8px; }
 .search-extra .field { margin-top: 4px; }
 
+/* Movie search results are restricted to direct files with an explicit
+   public-domain / Creative Commons license claim in Internet Archive. */
+.movie-search { width: min(700px, calc(100vw - 32px)); }
+.movie-search-body { display: grid; gap: 12px; }
+.movie-search-note { margin: 0; font-size: .8rem; color: var(--text-dim); line-height: 1.5; }
+.movie-results { display: grid; gap: 8px; margin: 0; max-height: 48dvh; overflow: auto; }
+.movie-results:empty { display: none; }
+.movie-result {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 11px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.movie-result-main { display: grid; gap: 6px; min-width: 0; }
+.movie-result-title { overflow-wrap: anywhere; font-size: .9rem; font-weight: 700; }
+.movie-result-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: .72rem; color: var(--text-mute); }
+.movie-result-meta .tag {
+  padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface); font-weight: 700;
+}
+.movie-result-meta .tag.license { color: var(--ok); text-decoration: none; }
+.movie-result-meta .tag.license:hover { border-color: var(--ok); }
+.movie-result-link { color: var(--accent-2); text-decoration: underline; text-underline-offset: 2px; }
+.movie-result-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.movie-result-actions .btn { padding: 7px 10px; font-size: .8rem; }
+
+@media (max-width: 560px) {
+  .movie-result { grid-template-columns: 1fr; }
+  .movie-result-actions { justify-content: flex-start; }
+}
+
 @media (max-width: 560px) {
   .search-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .search-filters .field:first-child { grid-column: 1 / -1; }
@@ -740,7 +783,7 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 .url-form { display: grid; gap: 8px; margin-top: 10px; }
 .url-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .url-actions .btn { flex: 1 1 auto; }
-.scan-site-button { width: 100%; margin-top: 8px; justify-content: center; }
+.movie-search-button { width: 100%; margin-top: 8px; justify-content: center; }
 
 .drop-zone {
   display: grid; place-items: center; gap: 6px;
