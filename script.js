@@ -175,11 +175,16 @@ const Settings = {
 const Toast = {
   host: null,
   init() { this.host = $('#toasts'); },
-  /** show('Saved', 'ok' | 'err' | 'warn' | 'info', ms) */
-  show(message, kind = 'info', ms = 3200) {
+  /**
+   * show('Saved', 'ok' | 'err' | 'warn' | 'info', ms, key?)
+   * Passing a `key` replaces the previous toast with the same key, so
+   * repeated feedback (volume steps, speed changes…) never stacks up.
+   */
+  show(message, kind = 'info', ms = 3200, key = null) {
     if (!this.host) return;
     const icons = { ok: 'i-check-circle', err: 'i-warn', warn: 'i-warn', info: 'i-play' };
-    const node = el('div', { class: `toast ${kind}`, role: 'status' },
+    if (key) $$(`[data-toast-key="${key}"]`, this.host).forEach((n) => n.remove());
+    const node = el('div', { class: `toast ${kind}`, role: 'status', dataset: key ? { toastKey: key } : {} },
       icon(icons[kind] || icons.info),
       el('span', { text: message }));
     this.host.append(node);
@@ -190,9 +195,9 @@ const Toast = {
     setTimeout(kill, ms);
     node.addEventListener('click', kill);
   },
-  ok(m, ms) { this.show(m, 'ok', ms); },
-  err(m, ms) { this.show(m, 'err', ms ?? 5000); },
-  warn(m, ms) { this.show(m, 'warn', ms ?? 4500); },
+  ok(m, ms, key) { this.show(m, 'ok', ms, key); },
+  err(m, ms, key) { this.show(m, 'err', ms ?? 5000, key); },
+  warn(m, ms, key) { this.show(m, 'warn', ms ?? 4500, key); },
 };
 
 /** Promise-based confirm dialog built on <dialog>. */
@@ -465,7 +470,6 @@ const Player = {
     v.addEventListener('play', () => { document.body.classList.add('is-playing'); this.updatePlayButton(); MediaSession.update(); });
     v.addEventListener('pause', () => { document.body.classList.remove('is-playing'); this.updatePlayButton(); this.hideSpinner(); this.rememberPosition(); MediaSession.update(); });
     v.addEventListener('ended', () => { this.onEnded(); MediaSession.update(); });
-    v.addEventListener('timeupdate', throttle(() => Controls.renderProgress(), 120));
     v.addEventListener('progress', throttle(() => Controls.renderProgress(), 250));
     v.addEventListener('durationchange', () => { Controls.renderProgress(); Controls.renderDuration(); });
     v.addEventListener('volumechange', () => Controls.renderVolume());
@@ -495,7 +499,7 @@ const Player = {
     this.video.defaultPlaybackRate = r;
     Settings.set('speed', r);
     Controls.renderSpeed();
-    if (!silent) Toast.show(`${r}× speed`, 'info', 1200);
+    if (!silent) Toast.show(`${r}× speed`, 'info', 1400, 'speed');
     return r;
   },
 
@@ -514,7 +518,7 @@ const Player = {
     this.video.muted = !!muted;
     Settings.set('muted', this.video.muted);
     Controls.renderVolume();
-    if (!silent) Toast.show(this.video.muted ? 'Muted' : 'Unmuted', 'info', 1100);
+    if (!silent) Toast.show(this.video.muted ? 'Muted' : 'Unmuted', 'info', 1100, 'mute');
   },
 
   toggleMute() { this.setMuted(!this.video.muted); },
@@ -524,7 +528,7 @@ const Player = {
     const target = clamp((this.video.muted ? 0 : this.video.volume) + delta, 0, 1);
     if (this.video.muted && delta > 0) this.video.muted = false;
     this.setVolume(target);
-    Toast.show(`Volume ${Math.round(target * 100)}%`, 'info', 1000);
+    Toast.show(`Volume ${Math.round(target * 100)}%`, 'info', 1100, 'volume');
   },
 
   togglePlay() { this.video.paused ? this.play() : this.pause(); },
@@ -1034,6 +1038,8 @@ const Menus = {
 
   close() {
     if (!this.open) return;
+    // The subtitle sheet has its own close routine (keeps aria-expanded in sync).
+    if (this.open === $('#subtitleSheet')) { Subtitles.closeSheet(); return; }
     this.open.hidden = true;
     $('#btnSpeed').setAttribute('aria-expanded', 'false');
     this.open = null;
@@ -1235,8 +1241,8 @@ const Keyboard = {
       case 'f': case 'F': e.preventDefault(); Controls.toggleFullscreen(); break;
       case 'p': case 'P': e.preventDefault(); Controls.togglePip(); break;
       case 'c': case 'C': e.preventDefault(); Subtitles.toggleEnabled(); break;
-      case 's': case 'S': e.preventDefault(); Playlist.toggleShuffle(); Toast.show(Settings.get('shuffle') ? 'Shuffle on' : 'Shuffle off', 'info', 1200); break;
-      case 'r': case 'R': e.preventDefault(); Playlist.cycleLoop(); Toast.show(`Loop: ${Settings.get('loopMode')}`, 'info', 1200); break;
+      case 's': case 'S': e.preventDefault(); Toast.show(Playlist.toggleShuffle() ? 'Shuffle on' : 'Shuffle off', 'info', 1200, 'mode'); break;
+      case 'r': case 'R': e.preventDefault(); Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode'); break;
       case 't': case 'T': e.preventDefault(); Theme.toggle(); break;
       case 'd': case 'D': e.preventDefault(); Offline.downloadCurrent(); break;
       case 'n': e.preventDefault(); Playlist.advance(1); break;
@@ -2122,7 +2128,7 @@ const Subtitles = {
     Settings.set('subtitleDelay', this.delay);
     $('#subtitleDelayOut').textContent = `${this.delay > 0 ? '+' : ''}${this.delay.toFixed(1)}s`;
     this.applyDelay();
-    if (!silent) Toast.show(`Subtitle delay ${this.delay > 0 ? '+' : ''}${this.delay.toFixed(1)}s`, 'info', 1200);
+    if (!silent) Toast.show(`Subtitle delay ${this.delay > 0 ? '+' : ''}${this.delay.toFixed(1)}s`, 'info', 1400, 'subdelay');
   },
 
   applyDelay() {
