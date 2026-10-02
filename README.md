@@ -144,8 +144,9 @@ The file is split into numbered sections so you can jump straight to what you ne
 
 1. Paste the URL into **Online video** and press **Play** (or **Queue** to add it without playing).
 2. Press **Sample** to cycle through a few public test streams (needs internet).
-3. Formats are detected from the URL. Cross-origin hosts must send CORS headers — see
-   [Limitations](#limitations--known-constraints).
+3. Formats are detected from the URL. Progressive MP4/WebM files play without CORS.
+   HLS/DASH playlists need CORS — see [Limitations](#limitations--known-constraints).
+   Watch-page URLs (YouTube, Vimeo, …) cannot be played; paste a direct file/stream URL.
 
 You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
 
@@ -312,9 +313,10 @@ MKV and AC-3 depend on the platform.
 
 These are inherent to a browser-based player (no backend, no DRM):
 
-1. **CORS** — remote files can only be played/downloaded if the server sends
-   `Access-Control-Allow-Origin` (or you use a CORS proxy). Same-origin files always work. Downloading
-   cross-origin without CORS falls back to an opaque cache entry with limited seeking.
+1. **CORS** — the `<video>` element can play progressive MP4/WebM without CORS (the service worker
+   does not intercept those requests). HLS/DASH playlists and offline **downloads** still need
+   `Access-Control-Allow-Origin`. Downloading cross-origin without CORS falls back to an opaque
+   cache entry with limited seeking. Watch pages (YouTube, Vimeo, social) are not direct files.
 2. **DRM / EME** — Widevine/PlayReady/FairPlay protected streams are not supported.
 3. **Live streams** — HLS/DASH live playlists can be played but not downloaded (there is no end).
 4. **DASH coverage** — `SegmentTemplate`, `SegmentTimeline`, `SegmentList` and `BaseURL` chains are
@@ -342,7 +344,7 @@ These are inherent to a browser-based player (no backend, no DRM):
 | Symptom | Cause / fix |
 |---------|-------------|
 | “Open this app over https:// or http://localhost” banner | You opened `file://`. Start a local server (see [Quick start](#quick-start)). |
-| Video loads but never plays, error card appears | The host blocks direct playback (CORS / `X-Frame-Options`-style referer checks). Open the URL in a new tab — if it plays there but not here, you need CORS or a proxy. |
+| Video loads but never plays, error card appears | Use a **direct** MP4/WebM/HLS/DASH URL (not a YouTube/Vimeo page). Progressive files play without CORS; HLS/DASH need CORS. Try the **Sample** button to verify a known-good stream. |
 | HLS/DASH says the library could not be loaded | You are offline **and** `vendor/` is missing. Restore the two vendored files. |
 | Download button does nothing | No service worker: the page must be on https/localhost and the SW must be registered (footer shows “Service worker: active”). |
 | Download fails with “This server does not allow cross-origin downloads” | Add `Access-Control-Allow-Origin` on the media host, or download from the same origin. |
@@ -396,6 +398,6 @@ node tests/ui-smoke.test.mjs          # 61 checks: boots the real DOM and drives
 
 - [hls.js](https://github.com/video-dev/hls.js) — HLS playback (Apache-2.0)
 - [dash.js](https://github.com/Dash-Industry-Forum/dash.js) — MPEG-DASH playback (BSD-3-Clause)
-- Sample streams referenced in the app belong to their respective owners (Apple, DASH-IF, test-videos.co.uk).
+- Sample streams referenced in the app belong to their respective owners (W3C, Google, Apple, DASH-IF).
 
 Icons and artwork are generated for this project, no third-party assets are bundled.

@@ -107,6 +107,8 @@ check('speed grid populated (10 options)', document.querySelectorAll('#speedGrid
 check('theme applied to <html>', ['dark', 'light'].includes(document.documentElement.dataset.theme));
 check('PiP hidden in jsdom (unsupported)', $('#btnPip').hidden === true);
 check('empty state visible on first run', $('#emptyState').hidden === false);
+check('buffering spinner is hidden on first run', $('#spinner').hidden === true);
+check('center play button is hidden until media is loaded', $('#bigPlay').hidden === true);
 
 console.log('\n— keyboard —');
 const key = (k, opts = {}) => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...opts }));
@@ -134,8 +136,12 @@ check('R cycles loop mode', ['all', 'one'].includes(document.body.className.matc
 console.log('\n— controls —');
 $('#btnPlay').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('play button works', video.paused === false);
+check('play flashes a center icon', $('#gestureFlash').classList.contains('show'));
 $('#btnPlay').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('play button pauses', video.paused === true);
+check('pause flashes a center icon', $('#gestureFlash').classList.contains('show'));
+await wait(1300);
+check('play/pause icon disappears after a second', !$('#gestureFlash').classList.contains('show'));
 $('#btnMute').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('mute button toggles', video.muted === true);
 $('#btnMute').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -165,9 +171,11 @@ console.log('\n— gestures —');
 const stage = $('#playerStage');
 const dbl = () => { stage.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true, cancelable: true })); };
 const before = video.paused;
+const barBeforeDbl = $('#controlsBar').classList.contains('is-hidden');
 dbl();
 check('dblclick toggles play/pause', video.paused !== before, `${before} → ${video.paused}`);
-check('gesture flash received the show class', $('#gestureFlash').classList.contains('show'));
+check('dblclick does not flash play/pause icons', !$('#gestureFlash').classList.contains('show'));
+check('dblclick does not toggle the control bar', $('#controlsBar').classList.contains('is-hidden') === barBeforeDbl);
 
 // double-click on a control must NOT toggle playback
 const pausedNow = video.paused;
@@ -177,8 +185,10 @@ check('dblclick on the control bar is ignored', video.paused === pausedNow);
 // single click toggles the bar
 const barHiddenBefore = $('#controlsBar').classList.contains('is-hidden');
 stage.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(400);
 check('single click toggles the control bar', $('#controlsBar').classList.contains('is-hidden') !== barHiddenBefore);
 stage.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(400);
 check('bar comes back on second click', $('#controlsBar').classList.contains('is-hidden') === barHiddenBefore);
 
 // touch double-tap

@@ -233,8 +233,8 @@ const check = (name, cond, extra = '') => {
 /* ------------------------- tests ------------------------- */
 console.log('\n— lifecycle —');
 await fire('install', {});
-check('install completes and precaches the shell', (await sandbox.caches.open('nebula-shell-1.0.0')).map.size >= 8,
-  String((await sandbox.caches.open('nebula-shell-1.0.0')).map.size));
+check('install completes and precaches the shell', (await sandbox.caches.open('nebula-shell-1.0.1')).map.size >= 8,
+  String((await sandbox.caches.open('nebula-shell-1.0.1')).map.size));
 check('install skips waiting', swSelf.skipped === true);
 await fire('activate', {});
 
@@ -347,6 +347,8 @@ check('ping returns the version', (await message({ type: 'ping' }))?.ok === true
 check('unknown messages are rejected', (await message({ type: 'nope' }))?.ok === false);
 const postRes = await fetchEvent('https://cdn.test/movie.mp4', { method: 'POST' });
 check('non-GET requests are ignored by the SW', postRes === null);
+const passthrough = await fetchEvent('https://cdn.test/uncached.mp4');
+check('uncached cross-origin media is not intercepted (avoids CORS/Referer breakage)', passthrough === null);
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
