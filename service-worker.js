@@ -23,7 +23,7 @@
 /* ---------------------------------------------------------------------
  * Configuration
  * ------------------------------------------------------------------ */
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 const SHELL_CACHE = `nebula-shell-${VERSION}`;
 const MEDIA_CACHE = `nebula-media-${VERSION}`;
 const INDEX_CACHE = `nebula-index-${VERSION}`;

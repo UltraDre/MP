@@ -359,12 +359,16 @@
           </div>
 
           <div class="dialog-body movie-search-body">
-            <p class="movie-search-note">Search Internet Archive’s movie catalog for items with an uploader-declared public-domain or Creative Commons license and a direct video file. This does not search every website or find paid-service streams. License claims are supplied by uploaders, not independently verified—open the record to check rights. Your query is sent to Internet Archive.</p>
+            <p class="movie-search-note">Search several catalogues of openly licensed video at once — Internet Archive, Wikimedia Commons and the federated PeerTube network — for movies, series episodes and shorts offered as a direct video file or stream. Only records that declare a public-domain or Creative Commons license are listed; the claims come from uploaders and are not independently verified, so open the record to check the rights. This does not search paid streaming services or the whole web. Your query is sent to the selected catalogues.</p>
             <div class="search-row">
-              <input class="input" type="search" id="movieSearchQuery" placeholder="Enter a movie name" aria-label="Movie name to search for" />
+              <input class="input" type="search" id="movieSearchQuery" placeholder="Enter a movie or series name" aria-label="Movie or series name to search for" />
               <button class="btn btn-primary" type="submit" id="btnMovieSearchGo"><svg aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></button>
             </div>
-            <p class="search-status" id="movieSearchStatus" role="status" aria-live="polite">Enter a title to search public-domain and Creative Commons movie files.</p>
+            <div class="search-row movie-search-filter">
+              <label for="movieSearchSource">Catalogue</label>
+              <select class="input" id="movieSearchSource" aria-label="Catalogue to search"></select>
+            </div>
+            <p class="search-status" id="movieSearchStatus" role="status" aria-live="polite">Enter a title to search public-domain and Creative Commons video files.</p>
             <ul class="movie-results" id="movieSearchResults" aria-label="Movie search results"></ul>
           </div>
 
@@ -504,6 +508,10 @@
     <label class="switch-row" style="margin-top:10px">
       <input type="checkbox" id="optSeekZones" />
       <span>Optional: double-tap the left / right third to seek −10s / +10s</span>
+    </label>
+    <label class="switch-row" style="margin-top:10px">
+      <input type="checkbox" id="optPrebuffer" />
+      <span>Keep downloading ahead while paused (uses mobile/desktop data in the background)</span>
     </label>
   </div>
 </dialog>
