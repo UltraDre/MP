@@ -65,6 +65,11 @@ No frameworks, no build step, no bundler — open it from any static server and 
 - Load external `.vtt` or `.srt` files (SRT is converted to WebVTT on the fly), auto-discover sidecar
   subtitles for local folders and remote URLs, select between multiple tracks, toggle on/off and shift
   the timing (±0.5 s steps, `[` / `]`).
+- **Search online** (`Shift`+`C` or the CC panel) — the name of the current video is cleaned up
+  (`Show.S02E04.1080p.WEB-DL.mkv` → *Show*, season 2, episode 4) and searched on OpenSubtitles
+  (legacy REST + the IMDb-based Stremio addon, plus the official OpenSubtitles.com API when you add a
+  free API key). Results are language-tagged, ranked and can be loaded with one click or saved as
+  `.srt`. You can also search any name you type, paste a subtitle link, or open a local file.
 - In-band/embedded text tracks (e.g. HLS captions) also appear in the list.
 
 **App / PWA**
@@ -137,8 +142,9 @@ The file is split into numbered sections so you can jump straight to what you ne
 | 12 | `Playlist` | queue, reordering, persistence, import/export |
 | 13 | `Offline` | talking to the service worker, downloads UI |
 | 14 | `Subtitles` | VTT/SRT tracks, delay, embedded tracks |
-| 15–17 | `Sources`, `Theme`, `Shell` | URL/local files, drag & drop, theme, panels, install |
-| 18–19 | `UI`, `App` | view helpers and boot sequence |
+| 15 | `SubtitleSearch` | online search (OpenSubtitles/Stremio), `Net` fetch helper, proxies |
+| 16–18 | `Sources`, `Theme`, `Shell` | URL/local files, drag & drop, theme, panels, install |
+| 19–20 | `UI`, `App` | view helpers and boot sequence |
 
 ---
 
@@ -179,6 +185,29 @@ Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or
 ✕ to remove, the header buttons to import/export/clear. **Export** writes a JSON file you can share;
 **Import** merges a JSON playlist back in.
 
+### 5. Subtitles — local files and online search
+
+- **Load .vtt / .srt file** adds tracks by hand; dropped subtitle files and sidecar files next to a
+  local video are picked up automatically. SRT is converted to WebVTT in memory.
+- **Search online…** (also <kbd>Shift</kbd>+<kbd>C</kbd>) opens the search dialog:
+  1. The name of the current video is prefilled — for a file like `Show.S02E04.1080p.WEB-DL.mkv` the
+     query becomes *Show* with season 2 / episode 4 filled in. You can type any other name instead.
+  2. Pick a language (defaults to your browser language; *Any language* searches everything) and press
+     **Search**. Results from every source are merged, ranked and tagged with language, downloads,
+     rating, HD and hearing-impaired flags.
+  3. **Click a result** to download it and attach it as a track (the CC panel shows it as
+     `· OpenSubtitles`). The ⤓ button next to a result saves the file to disk instead.
+- **More options** holds a paste-a-link field, a *File…* button, the CORS-proxy toggle and the optional
+  OpenSubtitles.com API key (free keys at <https://www.opensubtitles.com/en/consumers>) — with a key,
+  the official API is searched as a third source.
+
+> **Why a proxy toggle?** Browsers only allow cross-origin reads when the host sends CORS headers.
+> The subtitle sites often don't, so by default blocked requests are retried through a public CORS
+> proxy (`allorigins`, `codetabs`, `corsproxy.io`). Turn it off to keep every request direct — some
+> sources will then report “blocked by CORS”. You can also point the option at your own proxy from the
+> console: `localStorage` key `nebula.settings.v1` → `subSearchProxyUrl` (a prefix or a template
+> containing `{url}`).
+
 ---
 
 ## Gestures
@@ -214,7 +243,7 @@ Press <kbd>?</kbd> inside the app for this list.
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
 | <kbd>Space</kbd> / <kbd>K</kbd> | Play / pause | <kbd>M</kbd> | Mute |
-| <kbd>←</kbd> / <kbd>→</kbd> | Seek −5 s / +5 s | <kbd>C</kbd> | Subtitles on / off |
+| <kbd>←</kbd> / <kbd>→</kbd> | Seek −5 s / +5 s | <kbd>C</kbd> / <kbd>Shift</kbd>+<kbd>C</kbd> | Subtitles on/off · search online |
 | <kbd>J</kbd> / <kbd>L</kbd> | Seek −10 s / +10 s | <kbd>S</kbd> | Shuffle |
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Volume ±5 % | <kbd>R</kbd> | Loop off → all → one |
 | <kbd>0</kbd>–<kbd>9</kbd> | Jump to 0–90 % | <kbd>T</kbd> | Toggle theme |
@@ -348,7 +377,13 @@ These are inherent to a browser-based player (no backend, no DRM):
    hand back the handle without the File System Access API). Downloads are persisted normally.
 10. **Subtitle delay** is applied by shifting cue times in memory; it is not re-encoded into the file.
 11. **Cross-origin subtitles** are only auto-discovered when the host allows it; otherwise use the
-    “Load .vtt / .srt file” button.
+    “Load .vtt / .srt file” button or the online search.
+12. **Online subtitle search** depends on third-party sites and their CORS policy. When a host refuses
+    browser reads, the request is retried through a public CORS proxy (the toggle in *More options*);
+    searches themselves are only queries — nothing about the video file leaves your device.
+13. **OpenSubtitles legacy results** are downloaded from the Stremio mirror (plain UTF-8 `.srt`) with
+    the original `.gz` file as a fallback; browsers without `DecompressionStream` cannot unpack the
+    fallback, so those users should use the ⤓ save button and open the file manually.
 
 ---
 
@@ -365,6 +400,9 @@ These are inherent to a browser-based player (no backend, no DRM):
 | Playback stutters for 4K files | The browser decodes in software; try a lower resolution or close other tabs. |
 | Nothing is stored after a while | The browser evicted the cache (storage pressure). Grant persistent storage when prompted and keep free disk space. |
 | Subtitles do not appear | Enable them in the CC panel; check the file is a valid `.vtt`/`.srt` (SRT is converted automatically). |
+| Online subtitle search finds nothing | The name must match a release on OpenSubtitles — try a shorter title, clear the language filter or switch it to *Any language*. The status line names the source that failed and why. |
+| Search says “blocked by CORS” | The host refused the browser request. Enable **Retry blocked requests** in *More options* (uses a public proxy), or paste a direct subtitle link / load the file manually. |
+| OpenSubtitles.com (API key) returns “API key rejected” | The key is wrong or rate-limited. Remove it from *More options* to fall back to the free sources. |
 
 ---
 
@@ -393,7 +431,7 @@ The app itself needs **no build step and no dependencies**. Three optional harne
 node tests/static-checks.mjs          # ids, sprite references, asset paths, manifest, syntax sanity
 node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ranges, downloads
 npm install --no-save jsdom           # only for the UI test
-node tests/ui-smoke.test.mjs          # 73 checks: boots the real DOM and drives keyboard/gestures/playlist/page-scan
+node tests/ui-smoke.test.mjs          # 90 checks: boots the real DOM and drives keyboard/gestures/playlist/page-scan/subtitle-search
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest
@@ -402,8 +440,9 @@ node tests/ui-smoke.test.mjs          # 73 checks: boots the real DOM and drives
   a fake network and fake clients. It verifies HLS/DASH URL collection, byte accounting, range
   responses (`206` + `Content-Range`), aliasing, cancellation and cache cleanup.
 - `ui-smoke.test.mjs` boots `index.html` + `script.js` in jsdom with media-element stubs and exercises
-  shortcuts, gestures (including the touch double-tap timing), playlist reordering, subtitles and
-  localStorage persistence.
+  shortcuts, gestures (including the touch double-tap timing), playlist reordering, subtitles,
+  the online subtitle search (with a mocked OpenSubtitles/Stremio backend, language filters and
+  one-click loading) and localStorage persistence.
 
 ---
 
@@ -412,5 +451,10 @@ node tests/ui-smoke.test.mjs          # 73 checks: boots the real DOM and drives
 - [hls.js](https://github.com/video-dev/hls.js) — HLS playback (Apache-2.0)
 - [dash.js](https://github.com/Dash-Industry-Forum/dash.js) — MPEG-DASH playback (BSD-3-Clause)
 - Sample streams referenced in the app belong to their respective owners (W3C, Google, Apple, DASH-IF).
+- Online subtitle search talks to third-party services: [OpenSubtitles](https://www.opensubtitles.org)
+  (legacy REST API and the official [opensubtitles.com](https://www.opensubtitles.com) API),
+  [Stremio](https://www.strem.io)'s OpenSubtitles add-on and Cinemeta catalogue, and IMDb's public
+  suggestion endpoint for title lookup. Subtitles remain the property of their uploaders; the app only
+  queries those services from your browser and never proxies media.
 
 Icons and artwork are generated for this project, no third-party assets are bundled.
