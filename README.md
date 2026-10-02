@@ -45,6 +45,10 @@ No frameworks, no build step, no bundler — open it from any static server and 
   - `.m3u8` → `hls.js` (or native HLS on Safari/iOS)
   - `.mpd` → `dash.js`
   - MP4/WebM/M4V/MOV/OGG/MP3/M4A/… → played directly by the `<video>` element
+  - **Anything else** (a normal web page) → the page is fetched and scanned
+    automatically (`<video>`/`<source>` tags, `og:video` metadata, media links
+    and URLs embedded in the page's scripts) and every video found is added
+    to the playlist
 - **Local**: file picker, folder picker (sidecar `.vtt`/`.srt` subtitles are matched by filename),
   drag-and-drop onto the page, plus `Ctrl/Cmd+V` to paste a URL from the clipboard.
 - **Offline**: one click stores the current video (or every HLS/DASH segment) in the browser cache so it
@@ -146,7 +150,12 @@ The file is split into numbered sections so you can jump straight to what you ne
 2. Press **Sample** to cycle through a few public test streams (needs internet).
 3. Formats are detected from the URL. Progressive MP4/WebM files play without CORS.
    HLS/DASH playlists need CORS — see [Limitations](#limitations--known-constraints).
-   Watch-page URLs (YouTube, Vimeo, …) cannot be played; paste a direct file/stream URL.
+4. Links that are **not** direct media files (ordinary web pages) are scanned automatically:
+   the app fetches the page, extracts every video it references (`<video>`/`<source>` tags,
+   `og:video` metadata, media links and URLs embedded in the page's scripts) and adds them all
+   to the playlist — pressing **Play** starts the first one found. Scanning needs the page's
+   host to allow cross-origin reads (CORS); watch pages that don't (YouTube, Vimeo, …) still
+   require a direct file/stream URL.
 
 You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
 
@@ -176,8 +185,8 @@ Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or
 
 | Gesture | Action |
 |---------|--------|
-| **Double-tap** the video area (mobile) | Play / pause (a play/pause icon flashes as feedback) |
-| **Double-click** the video area (desktop) | Play / pause |
+| **Double-tap** the video area (mobile) | Play / pause (completely silent — no icon or text is shown) |
+| **Double-click** the video area (desktop) | Play / pause (completely silent — no icon or text is shown) |
 | **Single tap / click** the video area | Show / hide the control bar |
 | Optional (off by default, see *Keyboard shortcuts* dialog) | Double-tap the left/right third to seek −10 s / +10 s |
 | Drag a file over the player | Shows the drop overlay; drop to add |
@@ -189,10 +198,12 @@ Notes on the implementation:
 - Desktop uses the native `dblclick` event.
 - Every handler checks `event.target` first: taps on the control bar, buttons, sliders, playlist,
   URL input, dialogs or any `.card`/`.item` are **never** treated as gestures.
-- `touch-action: manipulation` on the stage prevents the browser's double-tap zoom, and the single-tap
-  action is delayed by ~320 ms on touch so a second tap can cancel it.
-- Play/pause feedback is shown as an animated overlay icon; seeks flash a "10s" ripple on the
-  corresponding side.
+- Page zoom is disabled everywhere (`maximum-scale=1, user-scalable=no` viewport, `touch-action:
+  pan-x pan-y`, plus JS guards against pinch / Ctrl+wheel / iOS gesture events), so taps never zoom —
+  including while typing in the URL field. The single-tap action is delayed by ~320 ms on touch so a
+  second tap can cancel it.
+- Play/pause is completely silent — no overlay icon or text is shown; only seeks flash a "10s"
+  ripple on the corresponding side.
 
 ---
 
@@ -314,9 +325,11 @@ MKV and AC-3 depend on the platform.
 These are inherent to a browser-based player (no backend, no DRM):
 
 1. **CORS** — the `<video>` element can play progressive MP4/WebM without CORS (the service worker
-   does not intercept those requests). HLS/DASH playlists and offline **downloads** still need
-   `Access-Control-Allow-Origin`. Downloading cross-origin without CORS falls back to an opaque
-   cache entry with limited seeking. Watch pages (YouTube, Vimeo, social) are not direct files.
+   does not intercept those requests). HLS/DASH playlists, offline **downloads** and the automatic
+   **page scan** still need `Access-Control-Allow-Origin`. Downloading cross-origin without CORS
+   falls back to an opaque cache entry with limited seeking. Watch pages (YouTube, Vimeo, social)
+   are not direct files, and their hosts block cross-origin reads, so the page scan cannot
+   extract their videos either — paste a direct file/stream URL.
 2. **DRM / EME** — Widevine/PlayReady/FairPlay protected streams are not supported.
 3. **Live streams** — HLS/DASH live playlists can be played but not downloaded (there is no end).
 4. **DASH coverage** — `SegmentTemplate`, `SegmentTimeline`, `SegmentList` and `BaseURL` chains are
@@ -378,9 +391,9 @@ The app itself needs **no build step and no dependencies**. Three optional harne
 
 ```bash
 node tests/static-checks.mjs          # ids, sprite references, asset paths, manifest, syntax sanity
-node tests/service-worker.test.mjs    # 49 checks: caching, HLS/DASH parsing, ranges, downloads
+node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ranges, downloads
 npm install --no-save jsdom           # only for the UI test
-node tests/ui-smoke.test.mjs          # 61 checks: boots the real DOM and drives keyboard/gestures/playlist
+node tests/ui-smoke.test.mjs          # 73 checks: boots the real DOM and drives keyboard/gestures/playlist/page-scan
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest

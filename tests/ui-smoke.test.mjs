@@ -134,14 +134,13 @@ key('r');
 check('R cycles loop mode', ['all', 'one'].includes(document.body.className.match(/loop-\w+/)?.[0]?.replace('loop-', '') ?? ''), document.body.className);
 
 console.log('\n— controls —');
+check('play/pause overlay was removed from the markup', $('#gestureFlash') === null);
 $('#btnPlay').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('play button works', video.paused === false);
-check('play flashes a center icon', $('#gestureFlash').classList.contains('show'));
 $('#btnPlay').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('play button pauses', video.paused === true);
-check('pause flashes a center icon', $('#gestureFlash').classList.contains('show'));
 await wait(1300);
-check('play/pause icon disappears after a second', !$('#gestureFlash').classList.contains('show'));
+check('play/pause never shows an overlay icon', $('#gestureFlash') === null);
 $('#btnMute').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('mute button toggles', video.muted === true);
 $('#btnMute').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -174,7 +173,7 @@ const before = video.paused;
 const barBeforeDbl = $('#controlsBar').classList.contains('is-hidden');
 dbl();
 check('dblclick toggles play/pause', video.paused !== before, `${before} → ${video.paused}`);
-check('dblclick does not flash play/pause icons', !$('#gestureFlash').classList.contains('show'));
+check('dblclick shows no play/pause overlay', $('#gestureFlash') === null);
 check('dblclick does not toggle the control bar', $('#controlsBar').classList.contains('is-hidden') === barBeforeDbl);
 
 // double-click on a control must NOT toggle playback
@@ -283,6 +282,49 @@ $('#btnDownload').dispatchEvent(new window.MouseEvent('click', { bubbles: true }
 await wait(120);
 check('download without SW warns instead of crashing', logs.errors.length === 0, logs.errors.join(' | '));
 check('download bar stays hidden', $('#downloadBar').hidden === true);
+
+console.log('\n— page scanning —');
+window.fetch = async (url) => ({
+  ok: true,
+  url: String(url),
+  text: async () => '<!doctype html><html><head>'
+    + '<meta property="og:video" content="/media/teaser.mp4">'
+    + '</head><body>'
+    + '<video src="https://cdn.example.com/movies/main-feature.mp4"></video>'
+    + '<a href="/trailers/preview.webm">Preview trailer</a>'
+    + '<a href="/about">About this site</a>'
+    + '<script>window.cfg = {"hls": "https://stream.example.com/live/playlist.m3u8?token=abc"};</scr' + 'ipt>'
+    + '</body></html>',
+});
+urlInput.value = 'https://site.example.com/watch/123';
+$('#urlForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(150);
+const scanTitles = [...document.querySelectorAll('#playlistList .item-title')].map((n) => n.textContent);
+check('page scan queued every video found on the page', document.querySelectorAll('#playlistList .item').length === 6,
+  JSON.stringify(scanTitles));
+await wait(300); // playlist save is debounced
+const scanUrls = JSON.parse(window.localStorage.getItem('nebula.playlist.v1')).items.map((i) => i.url);
+check('scan resolved relative URLs against the page', scanUrls.includes('https://site.example.com/media/teaser.mp4')
+  && scanUrls.includes('https://site.example.com/trailers/preview.webm'), JSON.stringify(scanUrls));
+check('scan picked up URLs injected via script text', scanUrls.some((u) => u.includes('playlist.m3u8')), JSON.stringify(scanUrls));
+check('non-media links were ignored', !scanUrls.some((u) => /about/i.test(u)), JSON.stringify(scanUrls));
+
+// direct media links must still play immediately — never fetched as a page
+const fetchedUrls = [];
+window.fetch = async (url) => { fetchedUrls.push(String(url)); return { ok: false, status: 404, text: async () => '' }; };
+submitUrl('https://cdn.example.com/direct.mp4');
+await wait(120);
+check('direct media links skip the scan', !fetchedUrls.includes('https://cdn.example.com/direct.mp4'),
+  JSON.stringify(fetchedUrls));
+check('direct link was added to the playlist', document.querySelectorAll('#playlistList .item').length === 7,
+  String(document.querySelectorAll('#playlistList .item').length));
+
+// a scan that fails (site blocks CORS) must not crash or add anything
+window.fetch = async () => { throw new TypeError('CORS blocked'); };
+const countBeforeFail = document.querySelectorAll('#playlistList .item').length;
+submitUrl('https://locked.example.com/watch');
+await wait(120);
+check('failed scan leaves the playlist untouched', document.querySelectorAll('#playlistList .item').length === countBeforeFail);
 
 console.log('\n— panel & theme —');
 $('#btnPanelToggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

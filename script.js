@@ -301,6 +301,16 @@ function detectType(url, fallback = 'unknown') {
   return fallback;
 }
 
+/** Extensions accepted when scanning a web page for playable videos. */
+const SCAN_MEDIA_EXT = /\.(mp4|m4v|mov|webm|ogv|ogg|mp3|m4a|aac|flac|wav|opus|mkv|m3u8|mpd)(\?|#|$)/i;
+
+/**
+ * Media-looking URLs inside raw page text (players that inject sources from
+ * JavaScript/JSON). Matches absolute (`https://…`), protocol-relative (`//…`)
+ * and root-relative (`/…`) URLs ending in a playable extension.
+ */
+const SCAN_TEXT_RE = /(?:(?:https?:)?\/\/|\/)[^\s"'`<>\\|,;()[\]{}]+?\.(?:mp4|m4v|mov|webm|ogv|ogg|mp3|m4a|aac|flac|wav|opus|mkv|m3u8|mpd)(?:\?[^\s"'`<>\\|,;()[\]{}]*)?/gi;
+
 const isStreamType = (t) => t === 'hls' || t === 'dash';
 
 /** 'progressive' → the MIME we advertise to the <video> element. */
@@ -544,11 +554,12 @@ const Player = {
     try { v.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
 
     /* ---- core element events ---- */
+    /* Play/pause is intentionally silent: no overlay icon, no text — the
+       control-bar play button is the only state indicator. */
     v.addEventListener('play', () => {
       document.body.classList.add('is-playing');
       this._hasPlayed = true;
       this.updatePlayButton();
-      if (!this._muteFlash) Controls.flashGesture(true, 'Playing');
       MediaSession.update();
     });
     v.addEventListener('pause', () => {
@@ -556,7 +567,6 @@ const Player = {
       this.updatePlayButton();
       this.hideSpinner();
       this.rememberPosition();
-      if (!v.ended && !this._muteFlash) Controls.flashGesture(false, 'Paused');
       MediaSession.update();
     });
     v.addEventListener('ended', () => { this.onEnded(); MediaSession.update(); });
@@ -757,7 +767,6 @@ const Player = {
     this.setError(null);
     this.hideEmptyState();
     this._hasPlayed = false;
-    this._muteFlash = true; // don't flash pause while tearing down the previous source
     this._loadGen = (this._loadGen || 0) + 1;
     const loadGen = this._loadGen;
     this.current = item;
@@ -798,7 +807,6 @@ const Player = {
       });
 
       if (!result.ok) {
-        this._muteFlash = false;
         this.setError({ title: `${type.toUpperCase()} could not be loaded`, detail: result.error },
           { retry: () => this.load(item, { force: true }) });
         return;
@@ -828,7 +836,6 @@ const Player = {
     Subtitles.attachItemTracks(item);
     Subtitles.detectSidecars(item).catch(() => { /* optional */ });
 
-    this._muteFlash = false;
     if (autoplay) this.play();
     else this.updatePlayButton();
   },
@@ -1108,26 +1115,6 @@ const Controls = {
     node.classList.remove('show'); void node.offsetWidth; node.classList.add('show');
   },
 
-  /** Brief play/pause icon flash (~1 second, then gone). */
-  flashGesture(playing, label = '') {
-    const node = $('#gestureFlash');
-    if (!node) return;
-    const use = $('#gestureFlashIcon') && $('#gestureFlashIcon').querySelector('use');
-    if (use) use.setAttribute('href', playing ? '#i-play' : '#i-pause');
-    node.dataset.label = label || '';
-    node.classList.remove('out');
-    node.classList.remove('show');
-    void node.offsetWidth;
-    node.classList.add('show');
-    clearTimeout(this._flashTimer);
-    this._flashTimer = setTimeout(() => {
-      node.classList.add('out');
-      this._flashTimer = setTimeout(() => {
-        node.classList.remove('show', 'out');
-      }, 220);
-    }, 1000);
-  },
-
   async toggleFullscreen() {
     const target = $('#playerColumn');
     try {
@@ -1326,12 +1313,8 @@ const Gestures = {
     if (zone === 'left') { Player.seekBy(-10); return; }
     if (zone === 'right') { Player.seekBy(10); return; }
 
-    // Silent play/pause: no overlay icons and no control-bar reveal.
-    Player._muteFlash = true;
+    // Silent play/pause: no overlay icon, no text, no control-bar reveal.
     Player.togglePlay();
-    Player._muteFlash = false;
-    const flash = $('#gestureFlash');
-    if (flash) flash.classList.remove('show', 'out');
   },
 
   /** Single tap toggles the control bar visibility. */
@@ -2436,7 +2419,12 @@ const Sources = {
     DragDrop.init();
   },
 
-  /** Validate + normalise the URL field, then play or queue it. */
+  /**
+   * Validate + normalise the URL field, then play or queue it.
+   * Links that are not direct media files (i.e. ordinary web pages) are
+   * fetched and scanned instead: every video found on the page is added
+   * to the playlist automatically.
+   */
   loadFromInput({ play = true } = {}) {
     const input = $('#urlInput');
     let value = input.value.trim();
@@ -2452,10 +2440,13 @@ const Sources = {
     try { parsed = new URL(value); } catch { Toast.err('That does not look like a valid URL'); return; }
     if (!/^https?:$/.test(parsed.protocol)) { Toast.err('Only http(s) URLs can be played from the network'); return; }
 
-    const blocked = unplayableHint(value);
-    if (blocked) { Toast.err(blocked); return; }
+    const type = detectType(value, '');
+    if (!type) {
+      // Not a direct file/stream URL — scan the page for videos.
+      this.scanPageForVideos(value, { play });
+      return;
+    }
 
-    const type = detectType(value, 'progressive');
     const item = {
       id: uid(),
       kind: 'remote',
@@ -2463,12 +2454,106 @@ const Sources = {
       url: value,
       type,
     };
-    const existing = Playlist.items.find((it) => it.url === value);
     const entry = Playlist.add(item, { silent: true });
     if (entry) entry.type = entry.type || type;
     if (play) Playlist.play(entry.id);
     else Toast.ok(`Queued: ${entry.title}`);
     if (play) Toast.show(`Loading ${type === 'hls' ? 'HLS' : type === 'dash' ? 'DASH' : 'video'} stream…`, 'info', 1800);
+  },
+
+  /* ------------------------------------------------------------------
+   * Page scanning — a submitted link that is not a direct media file is
+   * fetched, parsed for video sources, and every video found is queued.
+   * ---------------------------------------------------------------- */
+
+  /** Cap on how many videos one page scan may add to the playlist. */
+  MAX_SCAN_ITEMS: 50,
+
+  /** Fetch `pageUrl`, extract its videos and add them to the playlist. */
+  async scanPageForVideos(pageUrl, { play = true } = {}) {
+    const host = hostName(pageUrl) || 'the page';
+    Toast.show(`Scanning ${host} for videos…`, 'info', 8000, 'scan');
+    try {
+      const found = await this.fetchPageMedia(pageUrl);
+      if (!found.length) {
+        Toast.warn(`No playable videos found on ${host}`, 4500, 'scan');
+        return;
+      }
+      let added = 0;
+      let first = null;
+      for (const candidate of found) {
+        if (Playlist.items.some((it) => it.url === candidate.url)) continue;
+        const entry = Playlist.add({
+          id: uid(),
+          kind: 'remote',
+          title: candidate.title,
+          url: candidate.url,
+          type: detectType(candidate.url, 'progressive'),
+        }, { silent: true });
+        if (entry) { added += 1; if (!first) first = entry; }
+      }
+      if (!added) {
+        Toast.show('Those videos are already in the playlist', 'info', 3000, 'scan');
+        return;
+      }
+      Toast.ok(`Added ${added} video${added === 1 ? '' : 's'} from ${host}`, 4000, 'scan');
+      if (play && first) Playlist.play(first.id);
+    } catch (err) {
+      console.warn('[scan] failed', err);
+      const hint = unplayableHint(pageUrl);
+      Toast.err(hint || `Could not scan ${host} — the site blocks cross-origin reads. Paste a direct video URL instead.`, 6000, 'scan');
+    }
+  },
+
+  /** Fetch a page and return the list of candidate media URLs on it. */
+  async fetchPageMedia(pageUrl) {
+    const opts = { credentials: 'omit', redirect: 'follow', referrerPolicy: 'no-referrer' };
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      opts.signal = AbortSignal.timeout(15000);
+    }
+    const res = await fetch(pageUrl, opts);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const html = String(await res.text()).slice(0, 4_000_000); // cap pathological pages
+    return this.extractMediaUrls(html, res.url || pageUrl);
+  },
+
+  /** Collect playable media URLs out of raw page HTML (DOM + inline text). */
+  extractMediaUrls(html, baseUrl) {
+    const found = [];
+    const seen = new Set();
+
+    /** Resolve `raw` against the page URL; keep it only if it is playable media. */
+    const accept = (raw, title = '') => {
+      if (!raw || typeof raw !== 'string') return;
+      const clean = raw.trim();
+      if (!clean || /^(?:blob|data|javascript):/i.test(clean)) return;
+      let abs;
+      try { abs = new URL(clean, baseUrl).href; } catch { return; }
+      if (!/^https?:\/\//i.test(abs)) return;
+      if (seen.has(abs) || !SCAN_MEDIA_EXT.test(abs)) return;
+      seen.add(abs);
+      found.push({ url: abs, title: String(title).trim().slice(0, 90) || nameFromUrl(abs) });
+    };
+
+    /* 1. Structured markup: <video>/<source>, og:video metas, media links. */
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.querySelectorAll('video[src], video source[src], source[type^="video"]').forEach((node) => {
+        accept(node.getAttribute('src'));
+      });
+      doc.querySelectorAll(
+        'meta[property="og:video"], meta[property="og:video:url"], ' +
+        'meta[property="og:video:secure_url"], meta[name="twitter:player:stream"]'
+      ).forEach((node) => accept(node.getAttribute('content')));
+      doc.querySelectorAll('a[href]').forEach((a) => accept(a.getAttribute('href'), a.textContent));
+    } catch { /* unparseable markup — the raw-text sweep below still runs */ }
+
+    /* 2. Raw sweep: URLs the page injects through JavaScript / JSON. */
+    SCAN_TEXT_RE.lastIndex = 0;
+    let m;
+    while ((m = SCAN_TEXT_RE.exec(html)) !== null) accept(m[0]);
+
+    return found.slice(0, this.MAX_SCAN_ITEMS);
   },
 
   /** Add (and maybe play) local File objects. */
@@ -2666,6 +2751,22 @@ const Shell = {
     if (hasServiceWorker()) {
       navigator.serviceWorker.addEventListener('message', (e) => Offline.handleServiceWorkerMessage(e));
     }
+
+    /* Zoom lock — the page must never zoom: pinch, Ctrl+wheel and iOS
+       gesture events are all blocked here; the viewport meta in index.html
+       (maximum-scale=1, user-scalable=no) and `touch-action: pan-x pan-y`
+       in styles.css cover the rest. Text inputs are kept at 16px in CSS so
+       focusing a field never triggers the iOS type-to-zoom either. */
+    const blockGesture = (e) => e.preventDefault();
+    document.addEventListener('gesturestart', blockGesture);
+    document.addEventListener('gesturechange', blockGesture);
+    document.addEventListener('gestureend', blockGesture);
+    document.addEventListener('touchmove', (e) => {
+      if (e.touches.length > 1) e.preventDefault();   // two-finger pinch
+    }, { passive: false });
+    window.addEventListener('wheel', (e) => {
+      if (e.ctrlKey) e.preventDefault();              // trackpad pinch / Ctrl+scroll
+    }, { passive: false });
   },
 
   isMobilePanel() { return mediaQuery('(max-width: 1079px)').matches; },

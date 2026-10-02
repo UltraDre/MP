@@ -80,7 +80,10 @@
    ------------------------------------------------------------------ */
 *, *::before, *::after { box-sizing: border-box; }
 
-html, body { height: 100%; overflow: hidden; }
+/* No page zoom anywhere in the app: panning is allowed, pinch/double-tap
+   zoom are disabled at the touch-action level (backed up by the viewport
+   meta in index.html and a JS guard in script.js → Shell.init()). */
+html, body { height: 100%; overflow: hidden; touch-action: pan-x pan-y; }
 
 body {
   margin: 0;
@@ -91,7 +94,7 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   /* Prevent double-tap zoom / 300ms tap delay on touch devices */
-  touch-action: manipulation;
+  touch-action: pan-x pan-y;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior: none;
 }
@@ -99,6 +102,9 @@ body {
 h1, h2, h3, p, ul, ol, figure { margin: 0; }
 ul, ol { padding: 0; list-style: none; }
 button, input, select, textarea { font: inherit; color: inherit; }
+/* iOS auto-zooms the page when a text field smaller than 16px is focused —
+   keep every editable field at 16px so typing never triggers any zoom. */
+input, select, textarea { font-size: 16px; }
 a { color: var(--accent-2); }
 
 svg { width: 22px; height: 22px; fill: currentColor; flex: none; }
@@ -333,8 +339,8 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
   overflow: hidden;
   box-shadow: none;
   isolation: isolate;
-  /* Mobile: kill double-tap zoom, allow our own gestures */
-  touch-action: manipulation;
+  /* Mobile: kill all page zoom (pan only), allow our own gestures */
+  touch-action: pan-x pan-y;
   user-select: none;
   -webkit-user-select: none;
   cursor: pointer;
@@ -382,36 +388,6 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
 @keyframes orbit {
   from { transform: rotate(0) translateY(-16px) rotate(0); }
   to { transform: rotate(360deg) translateY(-16px) rotate(-360deg); }
-}
-
-/* Play / pause overlay — visible for ~1s then faded by JS removing .show */
-.gesture-flash {
-  position: absolute; inset: 0; margin: auto;
-  width: 120px; height: 120px;
-  display: grid; place-items: center;
-  border-radius: 50%;
-  background: rgba(10, 14, 28, .55);
-  -webkit-backdrop-filter: blur(4px);
-  backdrop-filter: blur(4px);
-  color: #fff;
-  opacity: 0; transform: scale(.6);
-  pointer-events: none;
-  transition: opacity .2s ease, transform .2s ease;
-}
-.gesture-flash svg { width: 54px; height: 54px; }
-.gesture-flash.show {
-  opacity: 1;
-  transform: scale(1);
-}
-.gesture-flash.show.out {
-  opacity: 0;
-  transform: scale(1.12);
-}
-.gesture-flash.show::after {
-  content: attr(data-label);
-  position: absolute; bottom: -26px;
-  font-size: .72rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #fff;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, .8);
 }
 
 /* Seek ripples (double-tap sides, J/L keys) */
@@ -959,8 +935,6 @@ kbd {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
-  /* Keep the play/pause overlay readable for a beat even when motion is reduced. */
-  .gesture-flash { transition-duration: .2s !important; }
 }
 
 @media print {

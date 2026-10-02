@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>Nebula Player — online &amp; offline media player (PWA)</title>
 <meta name="description" content="A modern, responsive, offline-capable media player for MP4/WebM/HLS/DASH streams and local files. Built with HTML5, CSS3 and vanilla JavaScript." />
 
@@ -128,11 +128,6 @@
 
         <!-- Buffering spinner -->
         <div class="spinner" id="spinner" hidden aria-hidden="true"><span></span><span></span><span></span></div>
-
-        <!-- Gesture feedback: play/pause flash -->
-        <div class="gesture-flash" id="gestureFlash" aria-hidden="true">
-          <svg id="gestureFlashIcon" aria-hidden="true"><use href="#i-play"/></svg>
-        </div>
 
         <!-- Seek ripple feedback for arrow keys / double-tap zones -->
         <div class="seek-flash" id="seekFlashLeft" aria-hidden="true"><svg aria-hidden="true"><use href="#i-back10"/></svg><span>10s</span></div>
@@ -325,7 +320,7 @@
             <button class="btn btn-ghost" id="btnDemoUrl" type="button" title="Load a sample stream (needs internet)">Sample</button>
           </div>
         </form>
-        <p class="card-hint">Direct file links only — MP4/WebM, HLS (<code>.m3u8</code>) and DASH (<code>.mpd</code>) are detected automatically. Watch-page URLs (YouTube, Vimeo, …) cannot be played. HLS/DASH playlists need CORS; progressive files play without it.</p>
+        <p class="card-hint">Paste any link — web pages are scanned automatically and every video found on them is added to the playlist. Direct file links (MP4/WebM, HLS <code>.m3u8</code>, DASH <code>.mpd</code>) play instantly. Watch-page URLs (YouTube, Vimeo, …) only work when the page exposes a direct file. HLS/DASH playlists need CORS; progressive files play without it.</p>
       </section>
 
       <section class="card" id="cardLocal">
