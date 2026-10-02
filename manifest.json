@@ -1,0 +1,54 @@
+{
+  "name": "Nebula Player — online & offline media player",
+  "short_name": "Nebula Player",
+  "description": "Play video from the web (MP4, WebM, HLS, DASH) or from your device, download streams for offline playback, and manage a playlist with subtitles, gestures and keyboard shortcuts.",
+  "id": "/nebula-player/",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui", "browser"],
+  "orientation": "any",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "categories": ["video", "entertainment", "utilities"],
+  "lang": "en",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Open a stream URL",
+      "short_name": "Open URL",
+      "description": "Jump straight to the URL field",
+      "url": "./index.html#url",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Offline library",
+      "short_name": "Offline",
+      "description": "See videos stored on this device",
+      "url": "./index.html#downloads",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "screenshots": [],
+  "prefer_related_applications": false
+}

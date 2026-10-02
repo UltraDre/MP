@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Nebula Player — online &amp; offline media player (PWA)</title>
+<meta name="description" content="A modern, responsive, offline-capable media player for MP4/WebM/HLS/DASH streams and local files. Built with HTML5, CSS3 and vanilla JavaScript." />
+
+<!-- PWA -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)" />
+<meta name="color-scheme" content="dark light" />
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Nebula Player" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<!-- Styles -->
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- =====================================================================
+     Inline SVG icon sprite (keeps markup tidy, no external requests)
+     ===================================================================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.14v13.72a1 1 0 0 0 1.54.84l10.3-6.86a1 1 0 0 0 0-1.68L9.54 4.3A1 1 0 0 0 8 5.14z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M7 5a1 1 0 0 1 2 0v5.2l7.6-5.5A1 1 0 0 1 18 5.5v13a1 1 0 0 1-1.4.8L9 13.8V19a1 1 0 0 1-2 0z"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M17 5a1 1 0 0 0-2 0v5.2L7.4 4.7A1 1 0 0 0 6 5.5v13a1 1 0 0 0 1.4.8L15 13.8V19a1 1 0 0 0 2 0z"/></symbol>
+  <symbol id="i-back10" viewBox="0 0 24 24"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/><text x="12" y="17" font-size="7" text-anchor="middle" font-family="system-ui, sans-serif" fill="currentColor">10</text></symbol>
+  <symbol id="i-fwd10" viewBox="0 0 24 24"><path d="M12 5V2l5 4-5 4V7a5 5 0 1 0 5 5h2a7 7 0 1 1-7-7z"/><text x="12" y="17" font-size="7" text-anchor="middle" font-family="system-ui, sans-serif" fill="currentColor">10</text></symbol>
+  <symbol id="i-vol-high" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-vol-low" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M15.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-vol-mute" viewBox="0 0 24 24"><path d="M11 5 6.5 9H3v6h3.5L11 19z"/><path d="M16 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M17 3.5 21 7l-4 3.5V8.2h-2.1c-1.2 0-1.9.5-2.6 1.4l-2.9 3.8c-1 1.3-2.2 2.1-4 2.1H3v-2h2.4c1.1 0 1.8-.5 2.5-1.4l2.9-3.8c1-1.3 2.2-2.1 4.1-2.1H17zM3 3.5h2.4c1.8 0 3 .8 4 2.1l.7.9-1.3 1.7-.9-1.2C7.3 6.1 6.6 5.5 5.4 5.5H3zm14 10.3L21 17l-4 3.5v-2.3h-2.1c-1.9 0-3.1-.8-4.1-2.1l-.6-.8 1.3-1.7.8 1c.7.9 1.4 1.4 2.6 1.4H17z"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M7 7h9.2l-1.9-1.9L15.7 4 19.5 7.8 15.7 11.6 14.3 10.2 16.2 8.3H8.3A2.3 2.3 0 0 0 6 10.6V12H4v-1.4A4.3 4.3 0 0 1 7 7zm10 10H7.8l1.9 1.9-1.4 1.4L4.5 16.5l3.8-3.8 1.4 1.4-1.9 1.9h7.9a2.3 2.3 0 0 0 2.3-2.3V12h2v1.7A4.3 4.3 0 0 1 17 17z"/></symbol>
+  <symbol id="i-repeat-1" viewBox="0 0 24 24"><path d="M7 6h9.2l-1.9-1.9L15.7 2.7 19.5 6.5 15.7 10.3 14.3 8.9 16.2 7H8.3A2.3 2.3 0 0 0 6 9.3V10.6H4V9.3A4.3 4.3 0 0 1 7 6zm10 11H7.8l1.9 1.9-1.4 1.4-3.8-3.8 3.8-3.8 1.4 1.4-1.9 1.9h7.9a2.3 2.3 0 0 0 2.3-2.3V13h2v1.7A4.3 4.3 0 0 1 17 17z"/><text x="12" y="12" font-size="8" text-anchor="middle" font-family="system-ui, sans-serif" fill="currentColor">1</text></symbol>
+  <symbol id="i-speed" viewBox="0 0 24 24"><path d="M12 4a9 9 0 0 1 9 9 8.9 8.9 0 0 1-1.6 5.1l-1.6-1.2A6.9 6.9 0 1 0 5.2 17L3.6 18.1A8.9 8.9 0 0 1 2 13a9 9 0 0 1 10-9z"/><path d="M11.2 13.3 16 8.5l-3.4 5.5a1.3 1.3 0 1 1-1.4-.7z"/></symbol>
+  <symbol id="i-cc" viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v10h16V7H4zm3.6 2.7c1 0 1.9.4 2.5 1.1l-1 1a2.1 2.1 0 0 0-1.5-.7 2.4 2.4 0 0 0 0 4.8c.6 0 1.1-.3 1.5-.7l1 1a3.6 3.6 0 0 1-2.5 1.1 3.9 3.9 0 0 1 0-7.6zm7 0c1 0 1.9.4 2.5 1.1l-1 1a2.1 2.1 0 0 0-1.5-.7 2.4 2.4 0 0 0 0 4.8c.6 0 1.1-.3 1.5-.7l1 1a3.6 3.6 0 0 1-2.5 1.1 3.9 3.9 0 0 1 0-7.6z"/></symbol>
+  <symbol id="i-pip" viewBox="0 0 24 24"><path d="M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 2v10h16V7H4zm8 4h6v4h-6z"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z"/></symbol>
+  <symbol id="i-collapse" viewBox="0 0 24 24"><path d="M9 3h2v6H5V7h4zM13 3h2v4h4v2h-6zM5 15h6v6H9v-4H5zM13 15h6v2h-4v4h-2z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M11 3h2v9.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4L11 12.6z"/><path d="M4 17h2v3h12v-3h2v5H4z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><path d="M12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10zm0-13v3M12 20v-3M4 12h3M17 12h3M6.3 6.3l2.1 2.1M15.6 15.6l2.1 2.1M17.7 6.3l-2.1 2.1M8.4 15.6l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 1 0 10.5 10.5z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 5h6l2 2h10a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 3v10h16V8H4z"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l1.4-1.4a1 1 0 0 1 1.4 1.4l-1.4 1.4a1 1 0 0 1-1.4 0z"/><path d="M7.8 16.2a4 4 0 0 1 0-5.7l2.8-2.8 1.4 1.4-2.8 2.8a2 2 0 0 0 2.8 2.8l2.8-2.8 1.4 1.4-2.8 2.8a4 4 0 0 1-5.6 0zm8.4-8.4a4 4 0 0 1 0 5.7l-1.9 1.9-1.4-1.4 1.9-1.9a2 2 0 0 0-2.8-2.8l-1.9 1.9-1.4-1.4 1.9-1.9a4 4 0 0 1 5.6 0z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4zm-3 6h12l-1 12H7zm3.5 2 .5 8h1l-.5-8zm3 0h1l-.5 8h-1z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 5l6 6-1.4 1.4L13 8.8V19h-2V8.8l-3.6 3.6L6 11z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 19l-6-6 1.4-1.4L11 15.2V5h2v10.2l3.6-3.6L18 13z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M12 10.6 6.7 5.3 5.3 6.7 10.6 12l-5.3 5.3 1.4 1.4L12 13.4l5.3 5.3 1.4-1.4L13.4 12l5.3-5.3-1.4-1.4z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M12 5a7 7 0 0 1 6.7 5h-2.2A5 5 0 0 0 7.7 12H10l-3.5 3.5L3 12h2.3A7 7 0 0 1 12 5zm6.7 7A7 7 0 0 1 5.3 14h2.2a5 5 0 0 0 8.8-2H14l3.5-3.5L21 12z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M9.6 16.2 5.4 12l-1.4 1.4 5.6 5.6 12-12-1.4-1.4z"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M3 6h18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zm1 2v8h16V8H4zm2 2h2v2H6zm4 0h2v2h-2zm4 0h2v2h-2zm4 0h2v2h-2zM6 13h2v1H6zm3 0h6v1H9zm7 0h2v1h-2z"/></symbol>
+  <symbol id="i-install" viewBox="0 0 24 24"><path d="M11 3h2v8.6l3.3-3.3 1.4 1.4-5.7 5.7-5.7-5.7 1.4-1.4L11 11.6z"/><path d="M5 18h14v2H5z"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M11 13V3h2v10h-2z"/><path d="M11 3l4 4-1.4 1.4L12 6.8 10.4 8.4 9 7zM5 18h14v2H5z"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M11 3h2v10h-2z"/><path d="M12 15.8l1.6-1.6L15 15.5 12 18.5 9 15.5l1.4-1.3zM5 18h14v2H5z"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h3v3H3zm5 .5h13v2H8zM3 10.5h3v3H3zm5 .5h13v2H8zM3 16h3v3H3zm5 .5h13v2H8z"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><path d="M12 6a4 4 0 0 1 4 4v1h3v2h-3v1a4 4 0 0 1-8 0v-1H5v-2h3v-1a4 4 0 0 1 4-4zm0-3 1.6 2h-3.2z"/><path d="M5 5.5 7.5 8l1.4-1.4L6.4 4.1zM19 5.5 16.5 8 15.1 6.6l2.5-2.5zM4 19.5 6.5 17l1.4 1.4L5.4 20.9zm16 0L17.5 17 16.1 18.4l2.5 2.5z"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18zm0 2a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm-.9 10.1-2.6-2.6-1.4 1.4 4 4 6-6-1.4-1.4z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3 1.5 21h21zM11 10h2v5h-2zm0 6.5h2v2h-2z"/></symbol>
+</svg>
+
+<div class="app" id="app">
+
+  <!-- ===================== Header ===================== -->
+  <header class="app-header" id="appHeader">
+    <a class="skip-link" href="#playerStage">Skip to player</a>
+
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><use href="#i-play"/></svg>
+      </span>
+      <h1 class="brand-name">Nebula<span>Player</span></h1>
+    </div>
+
+    <div class="header-actions">
+      <p class="net-pill" id="netPill" title="Connection status">
+        <span class="dot" aria-hidden="true"></span><span id="netLabel">Online</span>
+      </p>
+      <button class="icon-btn" id="btnShortcuts" type="button" aria-label="Keyboard shortcuts (?)" title="Keyboard shortcuts (?)">
+        <svg aria-hidden="true"><use href="#i-keyboard"/></svg>
+      </button>
+      <button class="icon-btn" id="btnTheme" type="button" aria-label="Toggle light / dark theme" title="Toggle theme (T)">
+        <svg class="icon-sun" aria-hidden="true"><use href="#i-sun"/></svg>
+        <svg class="icon-moon" aria-hidden="true"><use href="#i-moon"/></svg>
+      </button>
+      <button class="btn btn-ghost" id="btnInstall" type="button" hidden>
+        <svg aria-hidden="true"><use href="#i-install"/></svg><span>Install</span>
+      </button>
+      <button class="icon-btn panel-toggle" id="btnPanelToggle" type="button" aria-expanded="false" aria-controls="sidebar" aria-label="Toggle playlist panel" title="Playlist &amp; downloads">
+        <svg aria-hidden="true"><use href="#i-list"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Global notices -->
+  <div class="notices" id="notices" aria-live="polite">
+    <div class="notice" id="offlineNotice" hidden>
+      <svg aria-hidden="true"><use href="#i-warn"/></svg>
+      <span>You are offline. Downloaded videos and local files still play — network streams need a connection.</span>
+    </div>
+    <div class="notice" id="insecureNotice" hidden>
+      <svg aria-hidden="true"><use href="#i-warn"/></svg>
+      <span>Open this app over <strong>https://</strong> or <strong>http://localhost</strong> — service workers, offline caching and install are disabled on <code>file://</code>.</span>
+    </div>
+  </div>
+
+  <!-- ===================== Main layout ===================== -->
+  <main class="layout" id="layout">
+
+    <!-- ---------- Player column (fullscreen target) ---------- -->
+    <section class="player-column" id="playerColumn" aria-label="Media player">
+
+      <!-- The stage: fullscreen target + all gestures live here -->
+      <div class="stage" id="playerStage" tabindex="-1" aria-label="Video area. Double-tap or double-click to play or pause. Single tap toggles the control bar.">
+
+        <video id="video" class="video" playsinline webkit-playsinline preload="metadata" controlslist="nodownload" x-webkit-airplay="allow"></video>
+
+        <!-- Center play button (shown while paused, before first play) -->
+        <button class="big-play" id="bigPlay" type="button" aria-label="Play">
+          <svg aria-hidden="true"><use href="#i-play"/></svg>
+        </button>
+
+        <!-- Buffering spinner -->
+        <div class="spinner" id="spinner" hidden aria-hidden="true"><span></span><span></span><span></span></div>
+
+        <!-- Gesture feedback: play/pause flash -->
+        <div class="gesture-flash" id="gestureFlash" aria-hidden="true">
+          <svg id="gestureFlashIcon" aria-hidden="true"><use href="#i-play"/></svg>
+        </div>
+
+        <!-- Seek ripple feedback for arrow keys / double-tap zones -->
+        <div class="seek-flash" id="seekFlashLeft" aria-hidden="true"><svg aria-hidden="true"><use href="#i-back10"/></svg><span>10s</span></div>
+        <div class="seek-flash right" id="seekFlashRight" aria-hidden="true"><svg aria-hidden="true"><use href="#i-fwd10"/></svg><span>10s</span></div>
+
+        <!-- Error / empty states -->
+        <div class="error-box" id="errorBox" hidden role="alert">
+          <svg aria-hidden="true"><use href="#i-warn"/></svg>
+          <p class="error-title" id="errorTitle">Playback error</p>
+          <p class="error-detail" id="errorDetail"></p>
+          <div class="error-actions">
+            <button class="btn" id="btnErrorRetry" type="button">Retry</button>
+            <button class="btn btn-ghost" id="btnErrorDismiss" type="button">Dismiss</button>
+          </div>
+        </div>
+
+        <div class="empty-state" id="emptyState">
+          <svg aria-hidden="true"><use href="#i-play"/></svg>
+          <h2>No media loaded</h2>
+          <p>Paste a stream URL, pick a local file, or drag one onto this area.</p>
+          <div class="empty-actions">
+            <button class="btn btn-primary" id="btnEmptyLocal" type="button"><svg aria-hidden="true"><use href="#i-folder"/></svg>Open local file</button>
+            <button class="btn btn-ghost" id="btnEmptyDemo" type="button"><svg aria-hidden="true"><use href="#i-link"/></svg>Try a sample stream</button>
+          </div>
+          <p class="empty-hint">Supports MP4 · WebM · M4V · MOV · OGG · MP3 · M4A · MKV (codec dependent) · HLS <code>.m3u8</code> · DASH <code>.mpd</code></p>
+        </div>
+
+        <!-- Drag & drop veil -->
+        <div class="drop-veil" id="dropVeil" hidden aria-hidden="true">
+          <svg aria-hidden="true"><use href="#i-download"/></svg>
+          <p>Drop video or subtitle files to add them</p>
+        </div>
+      </div>
+
+      <!-- Title strip -->
+      <div class="title-strip">
+        <div class="title-text">
+          <p class="now-playing-label" id="nowPlayingLabel">Nothing playing</p>
+          <h2 class="now-playing-title" id="nowPlayingTitle" title="">—</h2>
+        </div>
+        <div class="title-badges">
+          <span class="badge" id="sourceBadge" hidden></span>
+          <span class="badge badge-offline" id="offlineBadge" hidden title="This item is stored on your device"><svg aria-hidden="true"><use href="#i-check-circle"/></svg>Offline copy</span>
+        </div>
+      </div>
+
+      <!-- ---------- Control bar ---------- -->
+      <div class="controls" id="controlsBar" role="group" aria-label="Playback controls">
+
+        <!-- Progress row -->
+        <div class="progress-row">
+          <span class="time" id="timeCurrent">0:00</span>
+          <div class="seek-wrap">
+            <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="0.1"
+                   aria-label="Seek" aria-valuetext="0:00 of 0:00" />
+            <div class="seek-tooltip" id="seekTooltip" hidden>0:00</div>
+          </div>
+          <span class="time" id="timeDuration">0:00</span>
+        </div>
+
+        <!-- Buttons row -->
+        <div class="buttons-row">
+          <div class="btn-group primary">
+            <button class="icon-btn" id="btnPrev" type="button" aria-label="Previous item" title="Previous (Shift+P)">
+              <svg aria-hidden="true"><use href="#i-prev"/></svg>
+            </button>
+            <button class="icon-btn lg" id="btnPlay" type="button" aria-label="Play" title="Play / pause (Space)" aria-keyshortcuts="Space K">
+              <svg class="ic-play" aria-hidden="true"><use href="#i-play"/></svg>
+              <svg class="ic-pause" aria-hidden="true"><use href="#i-pause"/></svg>
+            </button>
+            <button class="icon-btn" id="btnNext" type="button" aria-label="Next item" title="Next (Shift+N)">
+              <svg aria-hidden="true"><use href="#i-next"/></svg>
+            </button>
+          </div>
+
+          <div class="btn-group scrub">
+            <button class="icon-btn" id="btnBack10" type="button" aria-label="Rewind 10 seconds" title="Rewind 10s (J / ←)">
+              <svg aria-hidden="true"><use href="#i-back10"/></svg>
+            </button>
+            <button class="icon-btn" id="btnFwd10" type="button" aria-label="Forward 10 seconds" title="Forward 10s (L / →)">
+              <svg aria-hidden="true"><use href="#i-fwd10"/></svg>
+            </button>
+            <div class="volume-group">
+              <button class="icon-btn" id="btnMute" type="button" aria-label="Mute" title="Mute (M)" aria-keyshortcuts="M">
+                <svg class="ic-vh" aria-hidden="true"><use href="#i-vol-high"/></svg>
+                <svg class="ic-vl" aria-hidden="true"><use href="#i-vol-low"/></svg>
+                <svg class="ic-vm" aria-hidden="true"><use href="#i-vol-mute"/></svg>
+              </button>
+              <input type="range" id="volume" class="volume" min="0" max="1" step="0.01" value="1"
+                     aria-label="Volume" title="Volume (↑ / ↓)" />
+              <output class="volume-out" id="volumeOut" aria-hidden="true">100%</output>
+            </div>
+          </div>
+
+          <div class="btn-group secondary">
+            <button class="icon-btn" id="btnShuffle" type="button" aria-pressed="false" aria-label="Shuffle" title="Shuffle (S)">
+              <svg aria-hidden="true"><use href="#i-shuffle"/></svg>
+            </button>
+            <button class="icon-btn" id="btnLoop" type="button" aria-pressed="false" aria-label="Loop mode: off" title="Loop off → loop all → loop one (R)">
+              <svg class="ic-loop" aria-hidden="true"><use href="#i-repeat"/></svg>
+              <svg class="ic-loop1" aria-hidden="true"><use href="#i-repeat-1"/></svg>
+            </button>
+            <button class="icon-btn text-btn" id="btnSpeed" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Playback speed" title="Playback speed (Shift+&gt; / Shift+&lt;)">
+              <svg aria-hidden="true"><use href="#i-speed"/></svg><span id="speedLabel">1x</span>
+            </button>
+            <button class="icon-btn" id="btnCaptions" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (C)">
+              <svg aria-hidden="true"><use href="#i-cc"/></svg>
+            </button>
+            <button class="icon-btn" id="btnDownload" type="button" aria-label="Download for offline" title="Download for offline (D)">
+              <svg aria-hidden="true"><use href="#i-download"/></svg>
+            </button>
+            <button class="icon-btn" id="btnPip" type="button" aria-label="Picture in picture" title="Picture-in-picture (P)" hidden>
+              <svg aria-hidden="true"><use href="#i-pip"/></svg>
+            </button>
+            <button class="icon-btn" id="btnFullscreen" type="button" aria-label="Fullscreen" title="Fullscreen (F)" aria-keyshortcuts="F">
+              <svg class="ic-fs" aria-hidden="true"><use href="#i-expand"/></svg>
+              <svg class="ic-fsx" aria-hidden="true"><use href="#i-collapse"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- Download progress ---------- -->
+      <div class="download-bar" id="downloadBar" hidden>
+        <svg aria-hidden="true"><use href="#i-download"/></svg>
+        <div class="download-meta">
+          <p class="download-name" id="downloadName">Downloading…</p>
+          <div class="progress-track"><div class="progress-fill" id="downloadFill"></div></div>
+        </div>
+        <span class="download-pct" id="downloadPct">0%</span>
+        <button class="icon-btn sm" id="btnDownloadCancel" type="button" aria-label="Cancel download"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+      </div>
+
+      <!-- ---------- Subtitles / context panels ---------- -->
+      <div class="sheet" id="subtitleSheet" hidden>
+        <div class="sheet-head">
+          <h3>Subtitles</h3>
+          <button class="icon-btn sm" id="btnSubtitleClose" type="button" aria-label="Close subtitles panel"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <label class="switch-row">
+          <input type="checkbox" id="subtitleToggle" />
+          <span>Show subtitles</span>
+        </label>
+        <ul class="sheet-list" id="subtitleTracks"></ul>
+        <div class="sheet-actions">
+          <button class="btn" id="btnSubtitleLoad" type="button"><svg aria-hidden="true"><use href="#i-folder"/></svg>Load .vtt / .srt file</button>
+          <div class="offset-control">
+            <span>Delay</span>
+            <button class="icon-btn sm" id="btnSubtitleDelayMinus" type="button" aria-label="Subtitles 0.5s earlier">−</button>
+            <output id="subtitleDelayOut">0.0s</output>
+            <button class="icon-btn sm" id="btnSubtitleDelayPlus" type="button" aria-label="Subtitles 0.5s later">+</button>
+          </div>
+        </div>
+        <p class="sheet-hint">SRT files are converted to WebVTT automatically. Sidecar <code>.vtt</code> files next to a local video are added automatically.</p>
+      </div>
+
+      <!-- ---------- Speed menu ---------- -->
+      <div class="popup" id="speedMenu" role="menu" hidden>
+        <p class="popup-title">Playback speed</p>
+        <div class="speed-grid" id="speedGrid"></div>
+        <label class="switch-row">
+          <input type="checkbox" id="preservePitch" checked />
+          <span>Preserve pitch</span>
+        </label>
+      </div>
+
+      <!-- ---------- Playlist (inline, mobile) ---------- -->
+      <p class="sidebar-hint-mobile" id="sidebarHintMobile" hidden>
+        Playlist, downloads and URL input live in the <strong>panel</strong> — tap the
+        <svg aria-hidden="true"><use href="#i-list"/></svg> button in the header.
+      </p>
+    </section>
+
+    <!-- ---------- Sidebar: sources + playlist + downloads ---------- -->
+    <aside class="sidebar" id="sidebar" aria-label="Sources, playlist and downloads">
+      <div class="sidebar-handle" aria-hidden="true"></div>
+
+      <section class="card" id="cardUrl">
+        <h3 class="card-title"><svg aria-hidden="true"><use href="#i-link"/></svg>Online video</h3>
+        <form class="url-form" id="urlForm" novalidate>
+          <label class="sr-only" for="urlInput">Video URL</label>
+          <input type="url" id="urlInput" class="input" placeholder="https://…/video.m3u8" inputmode="url"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" />
+          <div class="url-actions">
+            <button class="btn btn-primary" id="btnLoadUrl" type="submit" title="Load and play now">
+              <svg aria-hidden="true"><use href="#i-play"/></svg><span>Play</span>
+            </button>
+            <button class="btn" id="btnQueueUrl" type="button" title="Add to playlist without playing">
+              <svg aria-hidden="true"><use href="#i-plus"/></svg><span>Queue</span>
+            </button>
+            <button class="btn btn-ghost" id="btnDemoUrl" type="button" title="Load a sample stream (needs internet)">Sample</button>
+          </div>
+        </form>
+        <p class="card-hint">Direct links only — MP4/WebM, HLS (<code>.m3u8</code>) and DASH (<code>.mpd</code>) are detected automatically. HLS/DASH need the streaming libraries (bundled locally, CDN used as fallback). <span class="muted">Cross-origin hosts must allow your origin (CORS).</span></p>
+      </section>
+
+      <section class="card" id="cardLocal">
+        <h3 class="card-title"><svg aria-hidden="true"><use href="#i-folder"/></svg>Local files</h3>
+        <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="Choose local video files or drop them here">
+          <svg aria-hidden="true"><use href="#i-download"/></svg>
+          <p><strong>Drop video files here</strong><br /><span class="muted">or click to browse</span></p>
+        </div>
+        <div class="row-2">
+          <button class="btn" id="btnAddLocal" type="button"><svg aria-hidden="true"><use href="#i-plus"/></svg>Add video(s)</button>
+          <button class="btn" id="btnAddFolder" type="button"><svg aria-hidden="true"><use href="#i-folder"/></svg>Add folder</button>
+        </div>
+        <p class="card-hint">Files never leave your device. Folders can include sidecar <code>.vtt</code>/<code>.srt</code> subtitles.</p>
+      </section>
+
+      <section class="card card-grow" id="cardQueue">
+        <div class="card-title-row">
+          <h3 class="card-title"><svg aria-hidden="true"><use href="#i-list"/></svg>Playlist <span class="count" id="playlistCount">0</span></h3>
+          <div class="card-title-actions">
+            <button class="icon-btn sm" id="btnImportPlaylist" type="button" aria-label="Import playlist JSON" title="Import playlist (.json)"><svg aria-hidden="true"><use href="#i-import"/></svg></button>
+            <button class="icon-btn sm" id="btnExportPlaylist" type="button" aria-label="Export playlist JSON" title="Export playlist (.json)"><svg aria-hidden="true"><use href="#i-export"/></svg></button>
+            <button class="icon-btn sm" id="btnClearPlaylist" type="button" aria-label="Clear playlist" title="Clear playlist"><svg aria-hidden="true"><use href="#i-trash"/></svg></button>
+          </div>
+        </div>
+        <ul class="list" id="playlistList" aria-label="Playlist items"></ul>
+        <p class="empty-note" id="playlistEmpty">Playlist is empty. Add a URL or local file.</p>
+      </section>
+
+      <section class="card card-grow" id="cardDownloads">
+        <div class="card-title-row">
+          <h3 class="card-title"><svg aria-hidden="true"><use href="#i-download"/></svg>Available offline <span class="count" id="downloadsCount">0</span></h3>
+          <div class="card-title-actions">
+            <button class="icon-btn sm" id="btnRefreshDownloads" type="button" aria-label="Refresh offline list" title="Refresh list"><svg aria-hidden="true"><use href="#i-refresh"/></svg></button>
+            <button class="icon-btn sm" id="btnPurgeDownloads" type="button" aria-label="Delete all offline videos" title="Delete all offline videos"><svg aria-hidden="true"><use href="#i-trash"/></svg></button>
+          </div>
+        </div>
+        <ul class="list" id="downloadsList" aria-label="Downloaded videos"></ul>
+        <p class="empty-note" id="downloadsEmpty">No downloads yet. Press the download button in the control bar to store the current video on this device.</p>
+        <p class="storage-note" id="storageNote"></p>
+      </section>
+    </aside>
+
+    <div class="scrim" id="scrim" hidden></div>
+  </main>
+
+  <footer class="app-footer">
+    <p>Nebula Player — vanilla JS PWA. <span class="muted">Service worker: <span id="swState">checking…</span></span></p>
+    <p class="muted"><span id="quotaLabel"></span></p>
+  </footer>
+</div>
+
+<!-- ===================== Dialogs ===================== -->
+<dialog class="dialog" id="shortcutsDialog">
+  <div class="dialog-head">
+    <h2>Keyboard shortcuts</h2>
+    <button class="icon-btn sm" type="button" data-close-dialog aria-label="Close"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="dialog-body">
+    <div class="kbd-grid">
+      <span><kbd>Space</kbd> / <kbd>K</kbd></span><span>Play / pause</span>
+      <span><kbd>←</kbd> / <kbd>→</kbd></span><span>Seek −5s / +5s</span>
+      <span><kbd>J</kbd> / <kbd>L</kbd></span><span>Seek −10s / +10s</span>
+      <span><kbd>↑</kbd> / <kbd>↓</kbd></span><span>Volume +5% / −5%</span>
+      <span><kbd>0</kbd>…<kbd>9</kbd></span><span>Jump to 0–90%</span>
+      <span><kbd>Home</kbd> / <kbd>End</kbd></span><span>Start / end</span>
+      <span><kbd>F</kbd></span><span>Fullscreen</span>
+      <span><kbd>P</kbd></span><span>Picture-in-picture</span>
+      <span><kbd>M</kbd></span><span>Mute</span>
+      <span><kbd>C</kbd></span><span>Subtitles on / off</span>
+      <span><kbd>S</kbd></span><span>Shuffle</span>
+      <span><kbd>R</kbd></span><span>Loop: off → all → one</span>
+      <span><kbd>T</kbd></span><span>Toggle theme</span>
+      <span><kbd>D</kbd></span><span>Download for offline</span>
+      <span><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></span><span>Next item</span>
+      <span><kbd>Shift</kbd>+<kbd>P</kbd></span><span>Previous item</span>
+      <span><kbd>[</kbd> / <kbd>]</kbd></span><span>Subtitles 0.5s later / earlier</span>
+      <span><kbd>Shift</kbd>+<kbd>&gt;</kbd> / <kbd>&lt;</kbd></span><span>Speed up / slow down</span>
+      <span><kbd>,</kbd> / <kbd>.</kbd></span><span>Frame step (paused)</span>
+      <span><kbd>Esc</kbd></span><span>Exit fullscreen / close dialogs</span>
+      <span><kbd>?</kbd></span><span>This help</span>
+    </div>
+    <h3>Gestures</h3>
+    <ul class="bullet">
+      <li><strong>Double-tap / double-click</strong> the video area → play / pause</li>
+      <li><strong>Single tap / click</strong> the video area → show / hide the control bar</li>
+      <li>Controls, playlist, sliders and inputs are excluded from gestures</li>
+    </ul>
+    <label class="switch-row" style="margin-top:10px">
+      <input type="checkbox" id="optSeekZones" />
+      <span>Optional: double-tap the left / right third to seek −10s / +10s</span>
+    </label>
+  </div>
+</dialog>
+
+<dialog class="dialog" id="confirmDialog">
+  <form method="dialog">
+    <div class="dialog-head"><h2 id="confirmTitle">Are you sure?</h2></div>
+    <div class="dialog-body"><p id="confirmMessage"></p></div>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" value="cancel" type="submit">Cancel</button>
+      <button class="btn btn-danger" id="confirmOk" value="ok" type="submit">Confirm</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===================== Hidden file inputs ===================== -->
+<input type="file" id="fileInput" accept="video/*,audio/*,.mp4,.webm,.m4v,.mov,.mkv,.ogv,.ogg,.mp3,.m4a,.aac,.flac,.wav,.m3u8,.mpd" multiple hidden />
+<input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+<input type="file" id="subtitleInput" accept=".vtt,.srt,.webvtt,.ttml,text/vtt" multiple hidden />
+<input type="file" id="playlistInput" accept=".json,application/json" hidden />
+
+<!-- Toast host -->
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<!-- Entry point. Streaming libs (hls.js / dash.js) are loaded on demand from
+     ./vendor with a CDN fallback — see script.js → StreamEngine.ensureLibrary() -->
+<script src="script.js" type="module"></script>
+</body>
+</html>
