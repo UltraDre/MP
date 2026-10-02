@@ -276,6 +276,107 @@ check('captions disabled persists', JSON.parse(window.localStorage.getItem('nebu
 $('#btnSubtitleClose').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('CC panel closes', $('#subtitleSheet').hidden === true);
 
+console.log('\n— online subtitle search —');
+const srtOnline = '1\n00:00:01,000 --> 00:00:03,000\nHello from the internet\n\n'
+  + '2\n00:00:04,000 --> 00:00:06,000\nSecond line\n';
+const osRows = [
+  {
+    IDSubtitle: '1', IDSubtitleFile: '111', SubFileName: 'clip.en.srt', SubLanguageID: 'eng',
+    LanguageName: 'English', SubFormat: 'srt', SubDownloadsCnt: '1200', SubRating: '4.2',
+    ISO639: 'en', SubEncoding: 'UTF-8', SubHD: '1', SeriesSeason: '0', SeriesEpisode: '0',
+  },
+  {
+    IDSubtitle: '2', IDSubtitleFile: '222', SubFileName: 'clip.el.srt', SubLanguageID: 'ell',
+    LanguageName: 'Greek', SubFormat: 'srt', SubDownloadsCnt: '30', SubRating: '0',
+    ISO639: 'el', SubEncoding: 'CP1253', SeriesSeason: '0', SeriesEpisode: '0',
+  },
+];
+const stremioRows = {
+  subtitles: [{
+    lang: 'eng', subtitleFileName: 'clip.stremio.en.srt', SubEncoding: 'UTF-8',
+    url: 'https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/333',
+  }],
+};
+const imdbRows = { d: [{ id: 'tt1727587', l: 'clip', qid: 'movie', rank: 100 }] };
+const subCalls = [];
+const bodyResponse = (obj) => {
+  const body = typeof obj === 'string' ? obj : JSON.stringify(obj);
+  const bytes = new window.TextEncoder().encode(body);
+  return {
+    ok: true, status: 200, url: '',
+    arrayBuffer: async () => bytes.buffer,
+    text: async () => body,
+  };
+};
+window.fetch = async (url) => {
+  const u = String(url);
+  subCalls.push(u);
+  if (u.startsWith('https://rest.opensubtitles.org/')) {
+    return bodyResponse(u.includes('sublanguageid-eng') ? osRows.slice(0, 1) : osRows);
+  }
+  if (u.startsWith('https://v3.sg.media-imdb.com/')) return bodyResponse(imdbRows);
+  if (u.startsWith('https://opensubtitles-v3.strem.io/')) return bodyResponse(stremioRows);
+  if (u.startsWith('https://subs5.strem.io/')) return bodyResponse(srtOnline);
+  return { ok: false, status: 404, url: u, arrayBuffer: async () => new ArrayBuffer(0), text: async () => '' };
+};
+
+$('#btnSubtitleOnline').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('CC panel opens the online search dialog', $('#subSearchDialog').open === true);
+check('query is prefilled from the current video', $('#subSearchQuery').value === 'clip', $('#subSearchQuery').value);
+check('language defaults to the browser language', $('#subSearchLang').value === 'en', $('#subSearchLang').value);
+await wait(400);
+check('results from both sources are listed',
+  document.querySelectorAll('#subSearchResults .sub-result').length === 2,
+  String(document.querySelectorAll('#subSearchResults .sub-result').length));
+check('result rows carry language + quality tags',
+  /English/.test($('#subSearchResults').textContent) && /HD/.test($('#subSearchResults').textContent),
+  $('#subSearchResults').textContent.slice(0, 140));
+check('status line reports the counts',
+  /result/i.test($('#subSearchStatus').textContent), $('#subSearchStatus').textContent);
+check('OpenSubtitles was asked for the prefilled name',
+  subCalls.some((u) => u.includes('/search/query-clip')), JSON.stringify(subCalls.slice(0, 2)));
+
+// "any language" lists everything, a filter narrows it down again
+$('#subSearchLang').value = '';
+const callsBeforeAny = subCalls.length;
+$('#subSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(400);
+check('“any language” searches without a language filter',
+  !subCalls.slice(callsBeforeAny).some((u) => u.includes('sublanguageid-')), '');
+check('every language is listed', /Greek/.test($('#subSearchResults').textContent),
+  $('#subSearchResults').textContent.slice(0, 160));
+
+$('#subSearchLang').value = 'en';
+$('#subSearchLang').dispatchEvent(new window.Event('change', { bubbles: true }));
+$('#subSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(400);
+check('language filter reaches the provider', subCalls.some((u) => u.includes('sublanguageid-eng')), '');
+check('other languages are filtered out', !/Greek/.test($('#subSearchResults').textContent),
+  $('#subSearchResults').textContent.slice(0, 160));
+
+// one click loads the subtitle
+const tracksBefore = document.querySelectorAll('#subtitleTracks li').length;
+$('#subSearchResults .sub-result .sub-result-main').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(400);
+const tracksAfter = document.querySelectorAll('#subtitleTracks li').length;
+check('clicking a result downloads and attaches the track', tracksAfter > tracksBefore, `${tracksBefore} → ${tracksAfter}`);
+check('the search dialog closes after loading', $('#subSearchDialog').open === false);
+check('the new track is tagged as an online source',
+  /OpenSubtitles/.test($('#subtitleTracks').textContent), $('#subtitleTracks').textContent.slice(0, 200));
+
+// saving a result to disk
+const saved = [];
+window.HTMLAnchorElement.prototype.click = function click() { saved.push(this.download); };
+$('#subSearchResults .sub-result [data-action="save"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(400);
+check('save button writes a .srt to the device', saved.some((n) => /\.srt$/.test(String(n))), JSON.stringify(saved));
+
+// Shift+C opens the same dialog
+key('C', { shiftKey: true });
+check('Shift+C opens the online search', $('#subSearchDialog').open === true);
+$('#btnSubSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('Close button hides the dialog', $('#subSearchDialog').open === false);
+
 console.log('\n— offline download (no service worker) —');
 const dlBefore = Number($('#downloadsCount').textContent);
 $('#btnDownload').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -325,6 +426,23 @@ const countBeforeFail = document.querySelectorAll('#playlistList .item').length;
 submitUrl('https://locked.example.com/watch');
 await wait(120);
 check('failed scan leaves the playlist untouched', document.querySelectorAll('#playlistList .item').length === countBeforeFail);
+
+console.log('\n— subtitle name parsing (through the UI) —');
+submitUrl('https://cdn.example.com/movies/The.Matrix.1999.1080p.BluRay.x264-GRP.mp4');
+await wait(120);
+$('#btnSubtitleOnline').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('release tags are stripped from the prefilled query', $('#subSearchQuery').value === 'The Matrix', $('#subSearchQuery').value);
+submitUrl('https://cdn.example.com/shows/Show.Name.S02E04.1080p.WEB-DL.mp4');
+await wait(120);
+$('#btnSubtitleOnline').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('SxxEyy fills the TV fields', $('#subSearchSeason').value === '2' && $('#subSearchEpisode').value === '4',
+  `${$('#subSearchSeason').value}/${$('#subSearchEpisode').value}`);
+submitUrl('https://cdn.example.com/shows/Other.Show.1x02.HDTV.mp4');
+await wait(120);
+$('#btnSubtitleOnline').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('1x02 numbering fills the TV fields too', $('#subSearchSeason').value === '1' && $('#subSearchEpisode').value === '2',
+  `${$('#subSearchSeason').value}/${$('#subSearchEpisode').value}`);
+$('#btnSubSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 
 console.log('\n— panel & theme —');
 $('#btnPanelToggle').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

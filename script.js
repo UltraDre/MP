@@ -12,8 +12,9 @@
  *   01 Utilities          07 StreamEngine (hls.js / dash.js)
  *   02 Persistence        08 Player (core playback)
  *   03 UI helpers         09 Gestures  |  10 Keyboard
- *   04 Toast / dialogs    11 Playlist |  12 Offline (downloads)
- *   05 Media helpers      13 Subtitles|  14 Shell wiring / boot
+ *   04 Toast / dialogs    11 Playlist  |  12 Offline (downloads)
+ *   05 Media helpers      13 Subtitles |  14 Online subtitle search
+ *   06 Sources/theme      15 Shell     |  16 UI |  17 Boot
  * ===================================================================== */
 
 'use strict';
@@ -203,6 +204,11 @@ const Settings = {
     subtitleDelay: 0,
     seekZones: false,       // double-tap left/right third = ±10s (opt-in)
     lastVolume: 1,
+    subSearchLang: '',      // preferred language for the online subtitle search
+    subSearchProxy: true,   // retry blocked (CORS) subtitle requests through a proxy
+    subSearchProxyUrl: '',  // optional custom proxy prefix / template ({url})
+    subSearchApiKey: '',    // optional opensubtitles.com API key (3rd source)
+    subSearchAutoSearch: true, // search as soon as the dialog opens for a video
   },
 
   load() {
@@ -1405,7 +1411,10 @@ const Keyboard = {
       case 'm': case 'M': e.preventDefault(); Player.toggleMute(); break;
       case 'f': case 'F': e.preventDefault(); Controls.toggleFullscreen(); break;
       case 'p': case 'P': e.preventDefault(); Controls.togglePip(); break;
-      case 'c': case 'C': e.preventDefault(); Subtitles.toggleEnabled(); break;
+      case 'c': case 'C':
+        e.preventDefault();
+        if (e.shiftKey) SubtitleSearch.open(); else Subtitles.toggleEnabled();
+        break;
       case 's': case 'S': e.preventDefault(); Toast.show(Playlist.toggleShuffle() ? 'Shuffle on' : 'Shuffle off', 'info', 1200, 'mode'); break;
       case 'r': case 'R': e.preventDefault(); Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode'); break;
       case 't': case 'T': e.preventDefault(); Theme.toggle(); break;
@@ -2125,15 +2134,26 @@ const Subtitles = {
     }
   },
 
-  /** Add a subtitle track from raw text (used for drag & dropped .vtt/.srt). */
-  addFromText(label, rawText) {
+  /**
+   * Add a subtitle track from raw text.
+   * Used for drag & dropped .vtt/.srt files and for subtitles downloaded from
+   * the online search (`kind: 'online'`). Passing text that is already WebVTT
+   * is fine — SRT is detected and converted on the fly.
+   *
+   * @param {string} label   display name (must be unique)
+   * @param {string} rawText .srt or .vtt contents
+   * @param {{lang?:string, kind?:'external'|'sidecar'|'online', source?:string}} [opts]
+   * @returns {object|null} the created track, or null when the label exists
+   */
+  addFromText(label, rawText, { lang = '', kind = 'external', source = '' } = {}) {
     const text = /^\s*WEBVTT/.test(rawText) ? rawText : this.srtToVtt(rawText);
     if (this.tracks.some((t) => t.label === label)) return null;
     const track = {
       id: uid(),
       label,
-      lang: '',
-      kind: 'external',
+      lang,
+      kind,
+      source,
       text,
       blobUrl: URL.createObjectURL(new Blob([text], { type: 'text/vtt' })),
     };
@@ -2237,9 +2257,9 @@ const Subtitles = {
   setEnabled(enabled, { notify = true } = {}) {
     Settings.set('captionsEnabled', !!enabled);
     const v = Player.video;
-    // Managed (external / sidecar) tracks: show exactly the selected one.
+    // Managed (external / sidecar / online) tracks: show exactly the selected one.
     this.tracks.forEach((t) => {
-      if (!t.element) return;
+      if (!t.element?.track) return;
       t.element.track.mode = enabled && !this.embeddedMode && t.id === this.activeId ? 'showing' : 'disabled';
     });
     // In-band tracks (HLS, MP4 soft subs): show only the selected index.
@@ -2256,7 +2276,7 @@ const Subtitles = {
 
     if (!notify) return;
     if (hasTracks) Toast.show(enabled ? 'Subtitles on' : 'Subtitles off', 'info', 1100);
-    else if (enabled) Toast.warn('No subtitle tracks loaded — use the CC panel to add a .vtt/.srt file.');
+    else if (enabled) Toast.warn('No subtitle tracks loaded — use the CC panel to load a .vtt/.srt file or search online (Shift+C).');
   },
 
   /** Number of in-band (embedded) subtitle tracks exposed by the media element. */
@@ -2357,7 +2377,7 @@ const Subtitles = {
             onchange: () => this.select(t.id),
           }),
           el('span', { text: t.label || 'Untitled' }),
-          el('span', { class: 'muted', text: t.kind === 'sidecar' ? '· sidecar' : '' }),
+          el('span', { class: 'muted', text: t.kind === 'sidecar' ? '· sidecar' : t.kind === 'online' ? `· ${t.source || 'online'}` : '' }),
         ),
       ));
     });
@@ -2390,7 +2410,864 @@ const Subtitles = {
 };
 
 /* =====================================================================
- * 15. SOURCES — URL input, local files, folders, drag & drop, samples
+ * 15. ONLINE SUBTITLE SEARCH — find, download and load subtitles by name
+ * ---------------------------------------------------------------------
+ * Opened from the CC panel ("Search online…") or with Shift+C. The name
+ * of the current video is filled in for you; typing another name (or a
+ * show + season/episode) searches that instead. Results load with one
+ * click, or can be saved to disk. Everything that is downloaded is
+ * converted to WebVTT before it is attached to the <video> element.
+ *
+ * Sources, merged into one ranked list:
+ *   • OpenSubtitles     — legacy REST search (rest.opensubtitles.org)
+ *   • OpenSubtitles     — via the Stremio addon (IMDb based, CORS friendly)
+ *   • OpenSubtitles.com — official API, only when an API key is configured
+ *
+ * Browsers refuse cross-origin reads when a host sends no CORS headers,
+ * so blocked requests are retried through public CORS proxies when the
+ * "Retry blocked requests" option is enabled (on by default).
+ * ===================================================================*/
+
+/** Languages offered by the online subtitle search (ISO 639-1 + 639-2/B). */
+const SUB_LANGS = [
+  { code: 'en', iso3: 'eng', name: 'English' },
+  { code: 'es', iso3: 'spa', name: 'Spanish' },
+  { code: 'pt', iso3: 'por', name: 'Portuguese' },
+  { code: 'pt-BR', iso3: 'pob', name: 'Portuguese (Brazil)' },
+  { code: 'fr', iso3: 'fre', name: 'French' },
+  { code: 'de', iso3: 'ger', name: 'German' },
+  { code: 'it', iso3: 'ita', name: 'Italian' },
+  { code: 'nl', iso3: 'nld', name: 'Dutch' },
+  { code: 'pl', iso3: 'pol', name: 'Polish' },
+  { code: 'ru', iso3: 'rus', name: 'Russian' },
+  { code: 'uk', iso3: 'ukr', name: 'Ukrainian' },
+  { code: 'tr', iso3: 'tur', name: 'Turkish' },
+  { code: 'ar', iso3: 'ara', name: 'Arabic' },
+  { code: 'he', iso3: 'heb', name: 'Hebrew' },
+  { code: 'el', iso3: 'ell', name: 'Greek' },
+  { code: 'cs', iso3: 'cze', name: 'Czech' },
+  { code: 'sk', iso3: 'slo', name: 'Slovak' },
+  { code: 'hu', iso3: 'hun', name: 'Hungarian' },
+  { code: 'ro', iso3: 'rum', name: 'Romanian' },
+  { code: 'bg', iso3: 'bul', name: 'Bulgarian' },
+  { code: 'hr', iso3: 'hrv', name: 'Croatian' },
+  { code: 'sr', iso3: 'srp', name: 'Serbian' },
+  { code: 'sl', iso3: 'slv', name: 'Slovenian' },
+  { code: 'sv', iso3: 'swe', name: 'Swedish' },
+  { code: 'no', iso3: 'nor', name: 'Norwegian' },
+  { code: 'da', iso3: 'dan', name: 'Danish' },
+  { code: 'fi', iso3: 'fin', name: 'Finnish' },
+  { code: 'is', iso3: 'ice', name: 'Icelandic' },
+  { code: 'et', iso3: 'est', name: 'Estonian' },
+  { code: 'lv', iso3: 'lav', name: 'Latvian' },
+  { code: 'lt', iso3: 'lit', name: 'Lithuanian' },
+  { code: 'hi', iso3: 'hin', name: 'Hindi' },
+  { code: 'bn', iso3: 'ben', name: 'Bengali' },
+  { code: 'ta', iso3: 'tam', name: 'Tamil' },
+  { code: 'te', iso3: 'tel', name: 'Telugu' },
+  { code: 'ml', iso3: 'mal', name: 'Malayalam' },
+  { code: 'ur', iso3: 'urd', name: 'Urdu' },
+  { code: 'ne', iso3: 'nep', name: 'Nepali' },
+  { code: 'si', iso3: 'sin', name: 'Sinhala' },
+  { code: 'zh', iso3: 'chi', name: 'Chinese (simplified)' },
+  { code: 'zh-TW', iso3: 'cht', name: 'Chinese (traditional)' },
+  { code: 'ja', iso3: 'jpn', name: 'Japanese' },
+  { code: 'ko', iso3: 'kor', name: 'Korean' },
+  { code: 'vi', iso3: 'vie', name: 'Vietnamese' },
+  { code: 'th', iso3: 'tha', name: 'Thai' },
+  { code: 'id', iso3: 'ind', name: 'Indonesian' },
+  { code: 'ms', iso3: 'may', name: 'Malay' },
+  { code: 'fil', iso3: 'fil', name: 'Filipino' },
+  { code: 'fa', iso3: 'per', name: 'Persian' },
+  { code: 'ca', iso3: 'cat', name: 'Catalan' },
+  { code: 'sq', iso3: 'alb', name: 'Albanian' },
+  { code: 'mk', iso3: 'mac', name: 'Macedonian' },
+  { code: 'ka', iso3: 'geo', name: 'Georgian' },
+  { code: 'hy', iso3: 'arm', name: 'Armenian' },
+  { code: 'az', iso3: 'aze', name: 'Azerbaijani' },
+  { code: 'kk', iso3: 'kaz', name: 'Kazakh' },
+  { code: 'uz', iso3: 'uzb', name: 'Uzbek' },
+  { code: 'af', iso3: 'afr', name: 'Afrikaans' },
+  { code: 'sw', iso3: 'swa', name: 'Swahili' },
+  { code: 'my', iso3: 'bur', name: 'Burmese' },
+  { code: 'km', iso3: 'khm', name: 'Khmer' },
+  { code: 'mn', iso3: 'mon', name: 'Mongolian' },
+];
+
+/** Public CORS proxies, tried in order when a source refuses the browser. */
+const SUB_PROXIES = [
+  { label: 'allorigins', wrap: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
+  { label: 'codetabs', wrap: (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` },
+  { label: 'corsproxy.io', wrap: (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}` },
+];
+
+/** 8298 → "8.3k" (used for the download counters in the result list). */
+function fmtCount(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(v);
+}
+
+/**
+ * Split a file name into a searchable title + season/episode/year.
+ * "Show.S02E04.1080p.WEB-DL.x264-GRP.mkv" → { title: 'Show', season: '2', episode: '4', year: '' }
+ * "Big.Buck.Bunny.2008.720p.mp4"          → { title: 'Big Buck Bunny', season: '', episode: '', year: '2008' }
+ */
+function parseMediaName(raw) {
+  let name = String(raw || '').trim();
+  try { name = decodeURIComponent(name); } catch { /* keep as-is */ }
+  name = name.replace(/[?#].*$/, '').replace(/\.[a-z0-9]{2,4}$/i, '');
+
+  let season = '', episode = '';
+  const sxe = name.match(/\bS(\d{1,2})[\s._-]?E(\d{1,3})\b/i);
+  const alt = name.match(/\b(\d{1,2})x(\d{2,3})\b/);
+  const sOnly = name.match(/\bS(\d{1,2})\b/i);
+  if (sxe) { season = String(+sxe[1]); episode = String(+sxe[2]); }
+  else if (alt) { season = String(+alt[1]); episode = String(+alt[2]); }
+  else if (sOnly) { season = String(+sOnly[1]); }
+
+  // Cut the release tags off: quality, source, codec, audio, year…
+  const cut = name.search(
+    /\b(?:19|20)\d{2}\b|\b(?:480|576|720|1080|1440|2160|4320)p\b|\b(?:4k|uhd|hdr10?|dv|sdr|dvdrip|bdrip|brrip|webrip|web-dl|webdl|bluray|blu-ray|hdtv|remux|repack|proper|extended|imax|multi|dual|dubbed|subbed|x264|x265|h264|h265|hevc|av1|xvid|divx|aac|ac3|eac3|dts|ddp?5|atmos)\b/i
+  );
+  let title = cut > 0 ? name.slice(0, cut) : name;
+  title = title
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .replace(/[._]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[-–—:;,]+\s*$/, '')
+    .trim();
+  if (!title) title = name.replace(/[._]+/g, ' ').trim();
+  return { title, season, episode, year: (name.match(/\b(19|20)\d{2}\b/) || [''])[0] };
+}
+
+/**
+ * Small network helper for the online search: timeouts, gzip, text
+ * decoding and transparent retries through CORS proxies.
+ */
+const Net = {
+  /** AbortSignal + timer pair; always call `done()` when the request ends. */
+  timeout(ms) {
+    if (typeof AbortController !== 'function') return { signal: undefined, done() { } };
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error('timeout')), ms);
+    return { signal: ctrl.signal, done: () => clearTimeout(timer) };
+  },
+
+  /** Fetch `url` as bytes. Failures carry a `code`: 'http' | 'timeout' | 'blocked'. */
+  async bytes(url, { timeout = 15000, headers = null } = {}) {
+    const { signal, done } = this.timeout(timeout);
+    try {
+      const res = await fetch(url, {
+        mode: 'cors', credentials: 'omit', redirect: 'follow', referrerPolicy: 'no-referrer',
+        signal, ...(headers ? { headers } : {}),
+      });
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { code: 'http', status: res.status });
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      if (!err?.code) err.code = signal?.aborted ? 'timeout' : 'blocked';
+      throw err;
+    } finally { done(); }
+  },
+
+  /** Fetch text, transparently unpacking `.gz` subtitle files. */
+  async text(url, { encoding = '', timeout = 15000, headers = null } = {}) {
+    const raw = await this.bytes(url, { timeout, headers });
+    const data = this.isGzip(raw) ? await this.ungzip(raw) : raw;
+    return this.decode(data, encoding);
+  },
+
+  isGzip(bytes) { return bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b; },
+
+  async ungzip(bytes) {
+    if (typeof DecompressionStream !== 'function') {
+      throw Object.assign(new Error('gzip is not supported here'), { code: 'gzip' });
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  },
+
+  /** Decode bytes using the encoding reported by the source (fallbacks included). */
+  decode(bytes, encoding = '') {
+    const attempt = (label) => {
+      try { return new TextDecoder(label).decode(bytes); } catch { return null; }
+    };
+    const map = {
+      ASCII: 'utf-8', 'UTF-8': 'utf-8', UTF8: 'utf-8', 'UTF-16': 'utf-16le',
+      'ISO-8859-1': 'iso-8859-1', 'ISO-8859-15': 'iso-8859-15', 'ISO-8859-2': 'iso-8859-2',
+      CP1250: 'windows-1250', CP1251: 'windows-1251', CP1252: 'windows-1252',
+      CP1253: 'windows-1253', CP1254: 'windows-1254', CP1255: 'windows-1255',
+      CP1256: 'windows-1256', CP1257: 'windows-1257', CP1258: 'windows-1258',
+      'KOI8-R': 'koi8-r', 'BIG5': 'big5', 'GB18030': 'gb18030',
+    };
+    const key = String(encoding || '').toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    let out = attempt(map[key] || 'utf-8') ?? attempt('utf-8') ?? '';
+    if (out.includes('\uFFFD')) {
+      const retry = attempt('windows-1252');
+      if (retry && !retry.includes('\uFFFD')) out = retry;
+    }
+    return out.replace(/^\uFEFF/, '');
+  },
+
+  /** Parse a JSON body, tolerating stray whitespace / error pages. */
+  jsonFrom(text) {
+    const trimmed = String(text || '').trim().replace(/^\)\]\}',?/, '');
+    try { return JSON.parse(trimmed); }
+    catch { throw Object.assign(new Error('unexpected response'), { code: 'parse' }); }
+  },
+
+  /**
+   * Fetch the first of `urls` that answers → { text, url, via }.
+   * Direct requests come first; when `proxy` is on, blocked requests are
+   * retried through the public proxies (and an optional custom one).
+   */
+  async fetchText(urls, { encoding = '', proxy = false, timeout = 15000, headers = null } = {}) {
+    const routes = [];
+    if (proxy) {
+      const custom = String(Settings.get('subSearchProxyUrl') || '').trim();
+      if (custom) {
+        routes.push({
+          label: 'custom proxy',
+          wrap: (u) => (custom.includes('{url}') ? custom.replace('{url}', encodeURIComponent(u)) : custom + u),
+        });
+      }
+      routes.push(...SUB_PROXIES);
+    }
+    const failures = [];
+    for (const url of urls) {
+      if (!url) continue;
+      try { return { text: await this.text(url, { encoding, timeout, headers }), url, via: '' }; }
+      catch (err) { failures.push(err); }
+      for (const route of routes) {
+        try {
+          // Proxies are slower than a direct hit — don't wait as long for them.
+          const text = await this.text(route.wrap(url), { timeout: Math.min(10000, timeout), encoding });
+          if (/^\s*(?:<!doctype|<html)/i.test(text)) throw Object.assign(new Error('proxy returned a page'), { code: 'proxy' });
+          return { text, url, via: route.label };
+        } catch (err) { failures.push(err); }
+      }
+    }
+    const blocked = failures.some((e) => e?.code === 'blocked');
+    const timedOut = failures.some((e) => e?.code === 'timeout');
+    throw Object.assign(new Error('request failed'), {
+      code: blocked ? 'cors' : timedOut ? 'timeout' : (failures[0]?.code || 'failed'),
+      failures,
+    });
+  },
+
+  async getJson(url, opts = {}) {
+    return this.jsonFrom((await this.fetchText([url], opts)).text);
+  },
+
+  /** POST JSON (used for the OpenSubtitles.com download ticket). */
+  async postJson(url, body, { timeout = 15000, headers = {} } = {}) {
+    const { signal, done } = this.timeout(timeout);
+    try {
+      const res = await fetch(url, {
+        method: 'POST', mode: 'cors', credentials: 'omit',
+        headers, body: JSON.stringify(body), signal,
+      });
+      if (!res.ok) {
+        throw Object.assign(new Error(`HTTP ${res.status}`), {
+          code: res.status === 401 || res.status === 403 ? 'apikey' : 'http', status: res.status,
+        });
+      }
+      return this.jsonFrom(await res.text());
+    } catch (err) {
+      if (!err?.code) err.code = signal?.aborted ? 'timeout' : 'blocked';
+      throw err;
+    } finally { done(); }
+  },
+};
+
+/** Providers — every one returns the same result shape. */
+const SubSources = {
+  /** Human readable reason for a failed provider. */
+  reason(err, proxy) {
+    const code = err?.code;
+    if (code === 'cors' || code === 'blocked') {
+      return proxy ? 'unreachable' : 'blocked by CORS — enable “Retry blocked requests”';
+    }
+    if (code === 'http') return `server error (HTTP ${err.status || '?'})`;
+    if (code === 'timeout') return 'timed out';
+    if (code === 'parse') return 'unexpected response';
+    if (code === 'noimdb') return 'no matching title in the IMDb index';
+    if (code === 'needepisode') return 'TV show — add season & episode';
+    if (code === 'apikey') return 'API key rejected';
+    return 'unavailable';
+  },
+
+  /* ---- OpenSubtitles — legacy REST search --------------------------- */
+
+  async openSubtitles({ query, lang, season, episode, proxy }) {
+    const parts = ['search', `query-${encodeURIComponent(query)}`];
+    if (lang?.iso3) parts.push(`sublanguageid-${lang.iso3}`);
+    if (season) parts.push(`season-${Number(season)}`);
+    if (episode) parts.push(`episode-${Number(episode)}`);
+    const rows = await Net.getJson(`https://rest.opensubtitles.org/${parts.join('/')}`, { proxy, timeout: 15000 });
+    if (!Array.isArray(rows)) return [];
+
+    let list = rows;
+    // When season/episode were given, prefer the rows that actually carry them.
+    if (season && episode) {
+      const tagged = rows.filter((r) => String(r.SeriesSeason || '0') !== '0');
+      if (tagged.length) {
+        list = tagged.filter((r) => String(r.SeriesSeason) === String(+season) && String(r.SeriesEpisode) === String(+episode));
+      }
+    }
+
+    return list.slice(0, 80).map((row) => {
+      const info = SubtitleSearch.langInfo(row.SubLanguageID || row.ISO639 || '');
+      const fileId = String(row.IDSubtitleFile || '');
+      const format = String(row.SubFormat || 'srt').toLowerCase();
+      return {
+        source: 'OpenSubtitles',
+        title: row.SubFileName || row.MovieReleaseName || row.MovieName || '',
+        lang: info?.code || '',
+        langName: row.LanguageName || info?.name || '',
+        format,
+        usable: !/^(zip|rar|7z|sub)$/.test(format),   // .ass/.ssa still open fine, MicroDVD does not
+        downloads: Number(row.SubDownloadsCnt) || 0,
+        rating: Number(row.SubRating) || 0,
+        hd: row.SubHD === '1',
+        hi: row.SubHearingImpaired === '1',
+        trusted: row.SubFromTrusted === '1' || /trusted|admin/i.test(row.UserRank || ''),
+        encoding: row.SubEncoding || '',
+        year: row.MovieYear && row.MovieYear !== '0' ? row.MovieYear : '',
+        // subs5.strem.io serves the same file as UTF-8 text (browser friendly);
+        // the official .gz link stays as a fallback for Net.
+        url: fileId ? `https://subs5.strem.io/en/download/subencoding-stremio-utf8/src-api/file/${fileId}` : '',
+        altUrl: row.SubDownloadLink || '',
+      };
+    });
+  },
+
+  /* ---- OpenSubtitles via the Stremio addon (IMDb based) ------------- */
+
+  /**
+   * Free-text name → IMDb id, using IMDb's public suggestion endpoint
+   * (falling back to Stremio's Cinemeta catalogue).
+   */
+  async resolveImdb(query, { proxy = false, series = false } = {}) {
+    const slug = String(query).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+    if (!slug) return null;
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const wanted = norm(query);
+    const score = (rows) => {
+      const items = rows.filter((it) => /^tt\d+$/.test(String(it.id || '')) && !/episode/i.test(it.qid || ''));
+      if (!items.length) return null;
+      const scored = items.map((it, i) => {
+        const title = norm(it.l || it.name);
+        let s = i;
+        if (title === wanted) s -= 30;
+        else if (title.startsWith(wanted) || wanted.startsWith(title)) s -= 10;
+        if (/series/i.test(it.qid || '') === series) s -= 15;
+        return { it, s };
+      }).sort((a, b) => a.s - b.s);
+      const best = scored[0].it;
+      return { id: best.id, series: /series/i.test(best.qid || ''), title: best.l || best.name || '' };
+    };
+
+    try {
+      const data = await Net.getJson(`https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(slug)}.json`, { proxy, timeout: 10000 });
+      const match = score(Array.isArray(data?.d) ? data.d : []);
+      if (match) return match;
+    } catch (err) {
+      if (err?.code === 'cors' || err?.code === 'blocked' || err?.code === 'timeout') throw err;
+    }
+
+    // Fallback: Stremio's Cinemeta catalogue search.
+    const type = series ? 'series' : 'movie';
+    const data = await Net.getJson(`https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(query)}.json`, { proxy, timeout: 10000 });
+    return score(Array.isArray(data?.metas) ? data.metas.map((m) => ({ id: m.imdb_id || m.id, l: m.name, qid: m.type === 'series' ? 'tvSeries' : 'movie' })) : []);
+  },
+
+  async stremio({ query, lang, season, episode, proxy }) {
+    const match = await this.resolveImdb(query, { proxy, series: !!season });
+    if (!match) throw Object.assign(new Error('no IMDb match'), { code: 'noimdb' });
+    if (match.series && !season) throw Object.assign(new Error('needs season/episode'), { code: 'needepisode' });
+    const path = match.series
+      ? `series/${match.id}:${Number(season)}:${Number(episode || 1)}`
+      : `movie/${match.id}`;
+    const data = await Net.getJson(`https://opensubtitles-v3.strem.io/subtitles/${path}.json`, { proxy, timeout: 15000 });
+    const rows = Array.isArray(data?.subtitles) ? data.subtitles : [];
+    return rows
+      .filter((row) => SubtitleSearch.langMatches(row.lang, lang))
+      .slice(0, 80)
+      .map((row) => {
+        const info = SubtitleSearch.langInfo(row.lang);
+        const name = row.subtitleFileName || row.movieReleaseName || match.title || query;
+        return {
+          source: 'OpenSubtitles (Stremio)',
+          title: name,
+          lang: info?.code || String(row.lang || '').toLowerCase(),
+          langName: info?.name || row.lang || '',
+          format: /\.vtt$/i.test(name) ? 'vtt' : 'srt',
+          usable: true,
+          downloads: 0,
+          rating: 0,
+          hd: !!row.hd,
+          hi: /\b(hi|sdh)\b/i.test(name),
+          trusted: !!row.fromTrusted,
+          encoding: row.SubEncoding || '',
+          year: '',
+          url: row.url || '',
+          altUrl: '',
+        };
+      })
+      .filter((r) => r.url);
+  },
+
+  /* ---- OpenSubtitles.com — official API (needs a free API key) ------ */
+
+  async openSubtitlesCom({ query, lang, season, episode, proxy, apiKey }) {
+    if (!apiKey) return [];
+    const params = new URLSearchParams({ query, order_by: 'download_count', order_direction: 'desc' });
+    if (lang?.code) params.set('languages', lang.code);
+    if (season) {
+      params.set('season_number', String(Number(season)));
+      params.set('episode_number', String(Number(episode || 1)));
+      params.set('type', 'episode');
+    } else {
+      params.set('type', 'movie');
+    }
+    const data = await Net.getJson(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, {
+      proxy, timeout: 15000, headers: { 'Api-Key': apiKey, Accept: 'application/json' },
+    });
+    const rows = Array.isArray(data?.data) ? data.data : [];
+    return rows.slice(0, 60).map((entry) => {
+      const a = entry.attributes || {};
+      const file = (a.files || [])[0] || {};
+      const details = a.feature_details || {};
+      const info = SubtitleSearch.langInfo(a.language);
+      return {
+        source: 'OpenSubtitles.com',
+        title: file.file_name || details.title || a.release || query,
+        lang: info?.code || String(a.language || '').toLowerCase(),
+        langName: info?.name || a.language || '',
+        format: /\.vtt$/i.test(file.file_name || '') ? 'vtt' : 'srt',
+        usable: true,
+        downloads: Number(a.download_count) || 0,
+        rating: Number(a.ratings) || 0,
+        hd: !!a.hd,
+        hi: !!a.hearing_impaired,
+        trusted: !!a.from_trusted,
+        encoding: '',
+        year: details.year || '',
+        fileId: file.file_id || '',
+        ticket: true,          // needs POST /download before a link exists
+        url: '',
+        altUrl: '',
+      };
+    }).filter((r) => r.fileId);
+  },
+
+  /** Exchange an OpenSubtitles.com file id for a short-lived link. */
+  async osComDownloadLink(fileId, apiKey) {
+    const data = await Net.postJson('https://api.opensubtitles.com/api/v1/download', { file_id: Number(fileId) }, {
+      timeout: 15000,
+      headers: { 'Api-Key': apiKey, Accept: 'application/json', 'Content-Type': 'application/json' },
+    });
+    if (!data?.link) throw Object.assign(new Error('no download link'), { code: 'failed' });
+    return data.link;
+  },
+};
+
+const SubtitleSearch = {
+  results: [],
+  busy: false,
+  loading: false,
+  lastUsedKey: null,
+  prefilledFor: null,
+  autoSearchedFor: null,
+  searchToken: 0,
+
+  init() {
+    /* Language list (kept in JS so the HTML stays readable) */
+    const select = $('#subSearchLang');
+    select.append(el('option', { value: '', text: 'Any language' }));
+    SUB_LANGS.forEach((l) => select.append(el('option', { value: l.code, text: l.name })));
+    select.value = this.preferredLang()?.code || '';
+    select.addEventListener('change', () => Settings.set('subSearchLang', select.value));
+
+    /* Entry points */
+    $('#btnSubtitleOnline').addEventListener('click', (e) => { e.stopPropagation(); this.open(); });
+    $('#btnSubSearchClose').addEventListener('click', () => this.close());
+    $('#btnSubSearchCancel').addEventListener('click', () => this.close());
+    $('#subSearchForm').addEventListener('submit', (e) => { e.preventDefault(); this.search(); });
+
+    /* Result list (delegated: the row loads, the small button saves) */
+    $('#subSearchResults').addEventListener('click', (e) => {
+      const row = e.target.closest('.sub-result');
+      if (!row) return;
+      const result = this.results.find((r) => r.key === row.dataset.key);
+      if (!result) return;
+      if (e.target.closest('[data-action="save"]')) this.save(result);
+      else this.use(result);
+    });
+
+    /* Manual link / file */
+    $('#btnSubSearchUrl').addEventListener('click', () => this.loadFromUrl($('#subSearchUrl').value));
+    $('#subSearchUrl').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); this.loadFromUrl($('#subSearchUrl').value); }
+    });
+    $('#btnSubSearchFile').addEventListener('click', () => { this.close(); $('#subtitleInput').click(); });
+
+    /* Options */
+    const proxy = $('#subSearchProxy');
+    proxy.checked = Settings.get('subSearchProxy') !== false;
+    proxy.addEventListener('change', () => Settings.set('subSearchProxy', proxy.checked));
+
+    const key = $('#subSearchApiKey');
+    key.value = Settings.get('subSearchApiKey') || '';
+    key.addEventListener('change', () => Settings.set('subSearchApiKey', key.value.trim()));
+
+    ['#subSearchSeason', '#subSearchEpisode'].forEach((sel) => {
+      $(sel).addEventListener('change', () => { if ($('#subSearchQuery').value.trim()) this.search(); });
+    });
+  },
+
+  /* ---------- helpers ---------- */
+
+  /** ISO-639 code / 3-letter code / English name → language record. */
+  langInfo(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return null;
+    const byCode = SUB_LANGS.find((l) => l.code.toLowerCase() === raw);
+    if (byCode) return byCode;
+    const byIso3 = SUB_LANGS.find((l) => l.iso3.toLowerCase() === raw);
+    if (byIso3) return byIso3;
+    const alias = { zht: 'zh-TW', cht: 'zh-TW', zhe: 'zh', zho: 'zh', zhcn: 'zh', scc: 'sr', pob: 'pt-BR', pb: 'pt-BR' };
+    if (alias[raw]) return SUB_LANGS.find((l) => l.code === alias[raw]) || null;
+    return SUB_LANGS.find((l) => l.name.toLowerCase() === raw) || null;
+  },
+
+  /** True when `actual` (any code form) matches `wanted` ("pt" ↔ "pt-BR"). */
+  langMatches(actual, wanted) {
+    if (!wanted) return true;
+    const info = this.langInfo(actual);
+    if (!info) return false;
+    if (info.code === wanted.code) return true;
+    const base = (s) => String(s || '').split('-')[0].toLowerCase();
+    return base(info.code) === base(wanted.code);
+  },
+
+  /** The user's stored choice, else the browser language. */
+  preferredLang() {
+    const stored = this.langInfo(Settings.get('subSearchLang'));
+    if (stored) return stored;
+    const nav = String(navigator.language || '').split('-')[0];
+    return this.langInfo(nav);
+  },
+
+  proxyOn() {
+    const box = $('#subSearchProxy');
+    return box ? box.checked : Settings.get('subSearchProxy') !== false;
+  },
+
+  /** Best available name of the current video (release name if we have it). */
+  mediaName(item) {
+    if (!item) return '';
+    const file = item.file?.name || (item.kind === 'file' ? item.title : '');
+    const url = item.url && !/^blob:/i.test(item.url) ? nameFromUrl(item.url) : '';
+    const candidates = [file, item.title, url].filter((v) => v && !/^https?:/i.test(v));
+    candidates.sort((a, b) => b.length - a.length);
+    return candidates[0] || '';
+  },
+
+  /** Fill the query (and season/episode) in from the current playlist item. */
+  prefill() {
+    const item = Player.current || Playlist.current;
+    const id = item?.id || 'none';
+    const field = $('#subSearchQuery');
+    if (this.prefilledFor === id && field.value.trim()) return;
+    this.prefilledFor = id;
+    const parsed = parseMediaName(this.mediaName(item));
+    field.value = parsed.title || '';
+    $('#subSearchSeason').value = parsed.season || '';
+    $('#subSearchEpisode').value = parsed.episode || '';
+  },
+
+  /* ---------- dialog ---------- */
+
+  open({ auto = true } = {}) {
+    const dlg = $('#subSearchDialog');
+    if (!dlg) return;
+    this.prefill();
+    $('#subSearchApiKey').value = Settings.get('subSearchApiKey') || '';
+    Shell.openDialog('#subSearchDialog');
+    setTimeout(() => $('#subSearchQuery').focus?.(), 60);
+    const item = Player.current;
+    const key = item?.id || 'none';
+    if (auto && Settings.get('subSearchAutoSearch') !== false && navigator.onLine !== false
+      && $('#subSearchQuery').value.trim() && this.autoSearchedFor !== key) {
+      this.autoSearchedFor = key;
+      this.search();
+    }
+  },
+
+  close() {
+    const dlg = $('#subSearchDialog');
+    if (!dlg) return;
+    if (typeof dlg.close === 'function') dlg.close();
+    else dlg.removeAttribute('open');
+  },
+
+  setStatus(text, kind = '') {
+    const node = $('#subSearchStatus');
+    node.textContent = text;
+    node.classList.toggle('is-busy', kind === 'busy');
+    node.classList.toggle('is-warn', kind === 'warn');
+  },
+
+  /* ---------- search ---------- */
+
+  async search({ query } = {}) {
+    const field = $('#subSearchQuery');
+    const q = String(query ?? field.value ?? '').trim();
+    if (!q) { this.setStatus('Type a name to search for.', 'warn'); return; }
+    if (navigator.onLine === false) {
+      this.setStatus('You are offline — the online search needs a connection.', 'warn');
+      return;
+    }
+    field.value = q;
+
+    const lang = this.langInfo($('#subSearchLang').value);
+    const season = $('#subSearchSeason').value.trim();
+    const episode = $('#subSearchEpisode').value.trim();
+    const proxy = this.proxyOn();
+    const apiKey = ($('#subSearchApiKey').value || '').trim();
+    const ctx = { query: q, lang, season, episode, proxy, apiKey };
+
+    const token = ++this.searchToken;
+    this.busy = true;
+    this.setStatus(`Searching “${q}”…`, 'busy');
+
+    const jobs = [
+      ['OpenSubtitles', () => SubSources.openSubtitles(ctx)],
+      ['OpenSubtitles (Stremio)', () => SubSources.stremio(ctx)],
+    ];
+    if (apiKey) jobs.push(['OpenSubtitles.com', () => SubSources.openSubtitlesCom(ctx)]);
+
+    const settled = await Promise.allSettled(jobs.map(([, run]) => run()));
+    if (token !== this.searchToken) return;      // a newer search superseded this one
+    this.busy = false;
+
+    const found = [];
+    const notes = [];
+    settled.forEach((outcome, i) => {
+      const name = jobs[i][0];
+      if (outcome.status === 'fulfilled') {
+        found.push(...outcome.value);
+        if (!outcome.value.length) notes.push(`${name}: no matches`);
+      } else {
+        console.warn('[subsearch]', name, outcome.reason);
+        notes.push(`${name}: ${SubSources.reason(outcome.reason, proxy)}`);
+      }
+    });
+
+    this.results = this.rank(found, lang);
+    this.render();
+
+    const counts = {};
+    this.results.forEach((r) => { counts[r.source] = (counts[r.source] || 0) + 1; });
+    const summary = Object.entries(counts).map(([src, n]) => `${n} from ${src}`).join(' · ');
+    const extra = notes.length ? ` — ${notes.join(' · ')}` : '';
+    if (!this.results.length) {
+      this.setStatus(`No subtitles found for “${q}”${extra}. Try a shorter name or another language.`, 'warn');
+      return;
+    }
+    this.setStatus(
+      `${this.results.length} result${this.results.length === 1 ? '' : 's'}: ${summary}. Click one to load it.${extra}`,
+      ''
+    );
+  },
+
+  /** Dedupe, drop unusable formats to the bottom and sort by usefulness. */
+  rank(list, lang) {
+    const seen = new Set();
+    const unique = [];
+    list.forEach((r) => {
+      const key = (r.url || r.altUrl || '') + '|' + (r.title || '');
+      if (seen.has(key)) return;
+      seen.add(key);
+      unique.push(r);
+    });
+
+    const score = (r) => {
+      let s = 0;
+      if (lang && this.langMatches(r.lang, lang)) s += 1e6;
+      if (!r.usable) s -= 5e5;
+      s += Math.log10(1 + (r.downloads || 0)) * 1e4;
+      s += (r.rating || 0) * 500;
+      if (r.trusted) s += 500;
+      if (r.hi) s -= 250;
+      return s;
+    };
+    return unique
+      .sort((a, b) => score(b) - score(a))
+      .slice(0, 150)
+      .map((r, i) => ({ ...r, key: 'r' + i }));
+  },
+
+  render() {
+    const list = $('#subSearchResults');
+    list.textContent = '';
+    this.results.forEach((r) => list.append(this.row(r)));
+  },
+
+  row(r) {
+    const tags = [
+      el('span', { class: 'tag lang', text: r.langName || r.lang || '?' }),
+    ];
+    if (r.downloads) tags.push(el('span', { class: 'tag', text: `⤓ ${fmtCount(r.downloads)}` }));
+    if (r.rating) tags.push(el('span', { class: 'tag', text: `★ ${r.rating.toFixed(1)}` }));
+    if (r.hd) tags.push(el('span', { class: 'tag hd', text: 'HD' }));
+    if (r.hi) tags.push(el('span', { class: 'tag', text: 'HI' }));
+    if (r.year) tags.push(el('span', { text: String(r.year) }));
+    tags.push(el('span', { text: r.source }));
+    if (!r.usable) tags.push(el('span', { class: 'muted', text: `· ${r.format || 'unknown'} — download only` }));
+
+    const item = el('li', { class: 'sub-result', dataset: { key: r.key } },
+      el('button', {
+        class: 'sub-result-main', type: 'button', 'data-action': 'use',
+        title: `Load “${r.title || 'subtitle'}”`,
+      },
+        el('span', { class: 'sub-result-name', text: r.title || 'Untitled subtitle' }),
+        el('span', { class: 'sub-result-meta' }, tags)),
+      el('div', { class: 'sub-result-actions' },
+        el('button', {
+          class: 'icon-btn sm', type: 'button', 'data-action': 'save',
+          title: 'Save this subtitle to your device', 'aria-label': 'Save subtitle file',
+        }, icon('i-download'))),
+    );
+    if (r.key === this.lastUsedKey) item.classList.add('is-active');
+    return item;
+  },
+
+  /* ---------- downloading ---------- */
+
+  /** Fetch the text of one result (handling .gz, encodings and proxies). */
+  async download(result) {
+    let urls = [result.url, result.altUrl].filter(Boolean);
+    if (result.ticket && result.fileId) {
+      const apiKey = ($('#subSearchApiKey').value || '').trim();
+      const link = await SubSources.osComDownloadLink(result.fileId, apiKey);
+      urls = [link, ...urls];
+    }
+    if (!urls.length) throw Object.assign(new Error('no download link'), { code: 'failed' });
+    return Net.fetchText(urls, { encoding: result.encoding, proxy: this.proxyOn() });
+  },
+
+  /** Load a result into the player as an online subtitle track. */
+  async use(result) {
+    if (this.loading) return;
+    this.loading = true;
+    Toast.show('Downloading subtitle…', 'info', 30000, 'subsearch');
+    try {
+      const { text, via } = await this.download(result);
+      const vtt = /^\s*WEBVTT/.test(text) ? text : Subtitles.srtToVtt(text);
+      if (!/-->/.test(vtt)) throw Object.assign(new Error('no cues'), { code: 'format' });
+      const track = Subtitles.addFromText(this.trackLabel(result), vtt, {
+        lang: result.lang || '',
+        kind: 'online',
+        source: result.source,
+      });
+      if (!track) { Toast.show('That subtitle is already loaded', 'info', 2200, 'subsearch'); return; }
+      this.lastUsedKey = result.key;
+      if (result.lang) Settings.set('subSearchLang', result.lang);
+      this.close();
+      Toast.ok(`Subtitles loaded — ${result.langName || result.lang || 'online'}${via ? ` (via ${via})` : ''}`, 3200, 'subsearch');
+    } catch (err) {
+      console.warn('[subsearch] load failed', err);
+      Toast.err(this.loadError(err), 6000, 'subsearch');
+    } finally { this.loading = false; }
+  },
+
+  /** Download a result and save it to disk (.srt / .vtt). */
+  async save(result) {
+    Toast.show('Downloading subtitle…', 'info', 30000, 'subsearch');
+    try {
+      const { text, via } = await this.download(result);
+      const name = this.fileName(result);
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+      const a = el('a', { href: url, download: name });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      Toast.ok(`Saved ${name}${via ? ` (via ${via})` : ''}`, 3500, 'subsearch');
+    } catch (err) {
+      console.warn('[subsearch] save failed', err);
+      Toast.err(this.loadError(err), 6000, 'subsearch');
+    }
+  },
+
+  /** Paste-a-link flow: fetch any .srt/.vtt URL and attach it. */
+  async loadFromUrl(raw) {
+    const url = String(raw || '').trim();
+    if (!/^https?:\/\/\S+$/i.test(url)) { Toast.warn('Paste a full http(s) link to a .srt or .vtt file'); return; }
+    const lang = this.langInfo($('#subSearchLang').value);
+    Toast.show('Downloading subtitle…', 'info', 30000, 'subsearch');
+    try {
+      const { text, via } = await Net.fetchText([url], { proxy: this.proxyOn() });
+      const vtt = /^\s*WEBVTT/.test(text) ? text : Subtitles.srtToVtt(text);
+      if (!/-->/.test(vtt)) throw Object.assign(new Error('no cues'), { code: 'format' });
+      const track = Subtitles.addFromText(this.trackLabel({ title: this.mediaName(Player.current) || nameFromUrl(url) }), vtt, {
+        lang: lang?.code || '',
+        kind: 'online',
+        source: via ? `link (${via})` : 'link',
+      });
+      if (!track) { Toast.show('That subtitle is already loaded', 'info', 2200, 'subsearch'); return; }
+      $('#subSearchUrl').value = '';
+      this.close();
+      Toast.ok(`Subtitles loaded${via ? ` (via ${via})` : ''}`, 3200, 'subsearch');
+    } catch (err) {
+      console.warn('[subsearch] link failed', err);
+      Toast.err(this.loadError(err), 6000, 'subsearch');
+    }
+  },
+
+  /** Unique track label derived from the result (CC panel shows it). */
+  trackLabel(result) {
+    const base = String(result?.title || 'Online subtitle')
+      .replace(/\.(srt|vtt|ass|ssa|sub|zip)$/i, '')
+      .replace(/[._]+/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      .slice(0, 60) || 'Online subtitle';
+    let label = base;
+    let n = 2;
+    while (Subtitles.tracks.some((t) => t.label === label) && n < 50) label = `${base} (${n++})`;
+    return label;
+  },
+
+  /** Name used when saving to disk: "Video.en.srt". */
+  fileName(result) {
+    const base = parseMediaName(this.mediaName(Player.current)).title
+      || String(result?.title || 'subtitle').replace(/\.[^.]+$/, '');
+    const lang = result?.lang || 'sub';
+    const ext = /vtt/i.test(result?.format || '') ? 'vtt' : 'srt';
+    return `${base.replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 60)}.${lang}.${ext}`;
+  },
+
+  /** Friendly explanation for a failed download / load. */
+  loadError(err) {
+    switch (err?.code) {
+      case 'gzip': return 'That source only offers a compressed (.gz) file and this browser cannot unpack it — save it and open it manually.';
+      case 'format': return 'That file does not contain readable .srt/.vtt subtitles.';
+      case 'cors': return 'The download was blocked by the host (CORS). Turn on “Retry blocked requests” or pick another result.';
+      case 'timeout': return 'The subtitle host took too long to answer.';
+      case 'http': return `The subtitle host answered with HTTP ${err.status || '?'}.`;
+      case 'apikey': return 'The OpenSubtitles.com API key was rejected — check it in “More options”.';
+      default: return 'Could not load that subtitle.';
+    }
+  },
+};
+
+/* =====================================================================
+ * 16. SOURCES — URL input, local files, folders, drag & drop, samples
  * ===================================================================*/
 
 const Sources = {
@@ -2692,7 +3569,7 @@ const DragDrop = {
 };
 
 /* =====================================================================
- * 16. THEME
+ * 17. THEME
  * ===================================================================*/
 
 const Theme = {
@@ -2719,7 +3596,7 @@ const Theme = {
 };
 
 /* =====================================================================
- * 17. SHELL — app-wide wiring (network state, panel, dialogs, install)
+ * 18. SHELL — app-wide wiring (network state, panel, dialogs, install)
  * ===================================================================*/
 
 const Shell = {
@@ -2828,7 +3705,7 @@ const Shell = {
 };
 
 /* =====================================================================
- * 18. UI — small view helpers shared by modules
+ * 19. UI — small view helpers shared by modules
  * ===================================================================*/
 
 const UI = {
@@ -2858,7 +3735,7 @@ const UI = {
 };
 
 /* =====================================================================
- * 19. BOOT
+ * 20. BOOT
  * ===================================================================*/
 
 const App = {
@@ -2871,6 +3748,7 @@ const App = {
     Controls.init();
     Menus.init();
     Subtitles.init();
+    SubtitleSearch.init();
     Gestures.init();
     Keyboard.init();
     Playlist.init();
