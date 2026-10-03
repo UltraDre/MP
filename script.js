@@ -1063,6 +1063,12 @@ const Player = {
    * ---------------------------------------------------------------- */
   async load(item, { autoplay = true, force = false } = {}) {
     if (!item) return;
+    // A saved local file that has not been re-linked yet has nothing to fetch:
+    // ask for it instead of failing with a media error.
+    if (item.kind === 'file' && !item.objectUrl && !item.file) {
+      Playlist.pickToReconnect(item);
+      return;
+    }
     if (!force && this.current && this.current.id === item.id &&
         (this.video.currentSrc || this.video.src) && !this.video.error) {
       if (autoplay) this.play();
@@ -1383,6 +1389,24 @@ const Controls = {
       UI.resumePromptDismissedFor = $('#resumePrompt').dataset.itemId || null;
       UI.renderResumePrompt();
     });
+
+    /* --- the "continue watching?" pop-up shown when the app is reopened --- */
+    const resumeDialog = $('#resumeDialog');
+    if (resumeDialog) {
+      const resumeDialogItem = () => Playlist.items.find((it) => it.id === resumeDialog.dataset.itemId);
+      $('#btnResumeDialogPlay')?.addEventListener('click', () => {
+        const item = resumeDialogItem();
+        resumeDialog.close();
+        if (item) Playlist.play(item.id);
+      });
+      $('#btnResumeDialogRestart')?.addEventListener('click', () => {
+        const item = resumeDialogItem();
+        resumeDialog.close();
+        if (!item) return;
+        Resume.clear(item);          // "start over" also forgets the stored position
+        Playlist.play(item.id);
+      });
+    }
 
     /* --- fullscreen state --- */
     document.addEventListener('fullscreenchange', () => {
@@ -1955,6 +1979,7 @@ const Playlist = {
       const id = li.dataset.id;
       const action = e.target.closest('[data-action]')?.dataset.action || 'play';
       if (action === 'play') this.play(id);
+      else if (action === 'reconnect') this.pickToReconnect(this.items.find((it) => it.id === id));
       else if (action === 'remove') this.remove(id);
       else if (action === 'up') this.move(id, -1);
       else if (action === 'down') this.move(id, 1);
@@ -2009,15 +2034,35 @@ const Playlist = {
     $('#btnImportPlaylist').addEventListener('click', () => $('#playlistInput').click());
     $('#btnSortPlaylist').addEventListener('click', () => this.sortAlpha());
     $('#playlistInput').addEventListener('change', (e) => { this.import(e.target.files?.[0]); e.target.value = ''; });
+    // Optional element: the service worker can serve a page and a script that are
+    // one update apart, so a missing node must never break the whole playlist.
+    $('#reconnectInput')?.addEventListener('change', (e) => { this.reconnectFiles(e.target.files); e.target.value = ''; });
   },
 
   /* ---------- data ---------- */
 
-  /** Serializable subset (local files can't be persisted). */
+  /**
+   * The whole queue, in a form that survives a restart.
+   *
+   * Remote / offline entries are stored in full. Local files cannot be — a
+   * browser will not hand a file handle back to a page it did not just open —
+   * so they are stored by *identity* (name, size, last-modified) instead of being
+   * dropped. That keeps the queue and its order intact across a restart; the file
+   * itself is re-linked with one pick (see `pickToReconnect`).
+   */
   serializable() {
-    return this.items
-      .filter((it) => it.kind !== 'file')
-      .map((it) => ({
+    return this.items.map((it) => (it.kind === 'file'
+      ? {
+        id: it.id, kind: 'file', title: it.title, type: it.type || 'progressive',
+        url: '',                       // a local file has no URL — the key is kept so
+        addedAt: it.addedAt,           // every stored entry has the same shape
+        file: {
+          name: it.fileName || it.file?.name || it.title || '',
+          size: Number(it.fileSize ?? it.file?.size) || 0,
+          lastModified: Number(it.fileLastModified ?? it.file?.lastModified) || 0,
+        },
+      }
+      : {
         id: it.id, kind: it.kind, title: it.title, url: it.url, type: it.type,
         offline: !!it.offline, originalUrl: it.originalUrl, addedAt: it.addedAt,
       }));
@@ -2040,21 +2085,59 @@ const Playlist = {
       const data = JSON.parse(raw);
       if (!data || !Array.isArray(data.items)) return;
       this.items = data.items
-        .filter((it) => it && typeof it.url === 'string' && !it.url.startsWith('blob:'))
-        .map((it) => ({ ...it, id: it.id || uid(), type: it.type || detectType(it.url, 'progressive') }));
+        .filter((it) => it && (it.kind === 'file'
+          ? !!(it.file && typeof it.file.name === 'string' && it.file.name)
+          : typeof it.url === 'string' && !it.url.startsWith('blob:')))
+        .map((it) => (it.kind === 'file'
+          // A local file comes back as a placeholder: the queue keeps its place,
+          // the bytes wait for the user to re-link them.
+          ? {
+            ...it, id: it.id || uid(), type: it.type || 'progressive',
+            file: null, objectUrl: '', missing: true,
+            fileName: it.file?.name || it.title, fileSize: Number(it.file?.size) || 0,
+            fileLastModified: Number(it.file?.lastModified) || 0,
+          }
+          : { ...it, id: it.id || uid(), type: it.type || detectType(it.url, 'progressive') }));
       // Restore the highlight on the title the app was last closed with, as long
-      // as that item is still in the list (local files are not persisted).
+      // as that item is still in the list.
       this.currentId = data.currentId && this.items.some((it) => it.id === data.currentId)
         ? data.currentId : null;
     } catch (err) { console.warn('[playlist] load failed', err); }
   },
 
+  /**
+   * A saved local file and a freshly picked one are the same video when their
+   * name, size and last-modified stamp line up. Used to re-link placeholders
+   * after a restart instead of adding duplicates.
+   */
+  sameLocalFile(entry, file) {
+    if (!entry || !file || entry.kind !== 'file') return false;
+    const name = entry.fileName || entry.file?.name || '';
+    if (!name || name !== file.name) return false;
+    const size = Number(entry.fileSize ?? entry.file?.size) || 0;
+    if (size && file.size && size !== file.size) return false;
+    const mtime = Number(entry.fileLastModified ?? entry.file?.lastModified) || 0;
+    return !(mtime && file.lastModified && mtime !== file.lastModified);
+  },
+
   /* ---------- queries ---------- */
 
-  has(item) {
-    return this.items.some((it) =>
+  has(item) { return !!this.findDuplicate(item); },
+
+  /**
+   * The entry an incoming item would duplicate: the same URL, the very same
+   * `File` object, or a saved local placeholder that describes the file being
+   * added again (which re-links it instead of adding a second row).
+   */
+  findDuplicate(item) {
+    if (!item) return null;
+    return this.items.find((it) =>
       (item.url && it.url === item.url && it.kind === item.kind) ||
-      (item.file && it.file === item.file));
+      (item.file && (it.file === item.file || this.sameLocalFile(it, item.file))) ||
+      // placeholder ↔ placeholder: the same exported local entry imported twice
+      (item.kind === 'file' && !item.file && it.kind === 'file' && !it.file &&
+        (it.fileName || it.title) === (item.fileName || item.title) &&
+        (Number(it.fileSize) || 0) === (Number(item.fileSize) || 0)));
   },
 
   indexOf(id) { return this.items.findIndex((it) => it.id === id); },
@@ -2064,18 +2147,49 @@ const Playlist = {
 
   /** Add an item (dedupes by URL / file) and optionally play it. */
   add(item, { play = false, silent = false } = {}) {
-    let existing = this.items.find((it) => (item.url && it.url === item.url && it.kind === item.kind) || (item.file && it.file === item.file));
+    let existing = this.findDuplicate(item);
     if (existing) {
+      // A local file that was waiting to be re-linked: attach it to its row.
+      if (existing.kind === 'file' && item.file && !existing.file) {
+        this.attachFile(existing, item.file);
+        if (!silent) Toast.ok(`Reconnected: ${existing.title}`);
+        if (play) this.play(existing.id);
+        return existing;
+      }
       if (!silent) Toast.show('Already in the playlist', 'info', 1800);
       if (play) this.play(existing.id);
       return existing;
     }
     const entry = { id: item.id || uid(), addedAt: Date.now(), ...item };
+    if (entry.kind === 'file' && entry.file) this.describeFile(entry);
     this.items.push(entry);
     this.save(); this.render();
     if (!silent) Toast.ok(`Added: ${entry.title}`);
     if (play) this.play(entry.id);
     return entry;
+  },
+
+  /** Copy the identity of a live `File` onto its entry, so it can be saved. */
+  describeFile(entry) {
+    const f = entry.file;
+    if (!f) return entry;
+    entry.fileName = f.name || entry.title;
+    entry.fileSize = Number(f.size) || 0;
+    entry.fileLastModified = Number(f.lastModified) || 0;
+    entry.missing = false;
+    return entry;
+  },
+
+  /** Hook a picked file up to a saved placeholder (and make it playable). */
+  attachFile(entry, file) {
+    if (!entry || !file) return false;
+    if (entry.objectUrl) { try { URL.revokeObjectURL(entry.objectUrl); } catch { /* ignore */ } }
+    entry.file = file;
+    entry.objectUrl = URL.createObjectURL(file);
+    entry.title = entry.title || file.name;
+    this.describeFile(entry);
+    this.save(); this.render();
+    return true;
   },
 
   remove(id) {
@@ -2132,7 +2246,11 @@ const Playlist = {
   play(id, opts = {}) {
     const item = typeof id === 'object' ? id : this.items.find((it) => it.id === id);
     if (!item) return;
-    Playlist.currentId = item.id;
+    // markCurrent() is the one place that writes `currentId`: it saves the choice
+    // and paints the highlight, so a reopen knows which title was playing. (A bare
+    // assignment here used to make markCurrent() see "no change" and skip the save,
+    // which is why the highlight and the resume offer disappeared after a restart.)
+    this.markCurrent(item.id);
     Player.load(item, opts);
   },
 
@@ -2153,12 +2271,27 @@ const Playlist = {
       if (nextIdx >= this.items.length) nextIdx = 0;
       if (nextIdx < 0) nextIdx = this.items.length - 1;
     }
+    // Skip local files that still need re-linking — autoplay cannot ask the user
+    // for a file, so those are stepped over until every neighbour is unavailable.
+    for (let step = 0; step < this.items.length; step++) {
+      const candidate = this.items[nextIdx];
+      if (candidate && this.isPlayable(candidate)) break;
+      nextIdx = (nextIdx + (direction < 0 ? -1 : 1) + this.items.length) % this.items.length;
+      if (nextIdx === idx) break;
+    }
     const next = this.items[nextIdx];
     if (!next) return;
     if (next.kind === 'file' && !next.objectUrl && next.file) {
       next.objectUrl = URL.createObjectURL(next.file); // blob URLs die on reload
     }
     this.play(next.id);
+  },
+
+  /** Can this entry be played right now, without asking the user for a file? */
+  isPlayable(item) {
+    if (!item) return false;
+    if (item.kind !== 'file') return true;
+    return !!(item.objectUrl || item.file);
   },
 
   toggleShuffle() {
@@ -2196,10 +2329,21 @@ const Playlist = {
       if (!Array.isArray(list)) throw new Error('Unrecognised playlist format');
       let added = 0;
       for (const raw of list) {
-        if (!raw?.url || raw.url.startsWith('blob:')) continue;
-        const type = raw.type || detectType(raw.url, 'progressive');
-        const entry = { id: uid(), kind: raw.kind === 'offline' ? 'offline' : 'remote', title: raw.title || nameFromUrl(raw.url), url: raw.url, type, offline: !!raw.offline, addedAt: Date.now() };
-        if (this.has(entry)) continue;
+        let entry;
+        if (!raw?.url && raw?.kind === 'file' && raw?.file?.name) {
+          // A local file from an exported playlist: kept as a saved placeholder.
+          entry = {
+            id: uid(), kind: 'file', title: raw.title || raw.file.name, type: raw.type || 'progressive',
+            file: null, objectUrl: '', missing: true,
+            fileName: raw.file.name, fileSize: Number(raw.file.size) || 0,
+            fileLastModified: Number(raw.file.lastModified) || 0, addedAt: Date.now(),
+          };
+        } else {
+          if (!raw?.url || raw.url.startsWith('blob:')) continue;
+          const type = raw.type || detectType(raw.url, 'progressive');
+          entry = { id: uid(), kind: raw.kind === 'offline' ? 'offline' : 'remote', title: raw.title || nameFromUrl(raw.url), url: raw.url, type, offline: !!raw.offline, addedAt: Date.now() };
+        }
+        if (this.findDuplicate(entry)) continue;
         this.items.push(entry); added++;
       }
       this.save(); this.render();
@@ -2243,21 +2387,29 @@ const Playlist = {
 
     this.items.forEach((item, i) => {
       const tag = this.tagFor(item);
+      const missing = item.kind === 'file' && !item.file && !item.objectUrl;
       const li = el('li', {
-        class: `item${item.id === this.currentId ? ' is-current' : ''}`,
+        class: `item${item.id === this.currentId ? ' is-current' : ''}${missing ? ' is-missing' : ''}`,
         dataset: { id: item.id },
         draggable: 'true',
       },
         el('span', { class: 'item-index', text: String(i + 1) }),
-        el('button', { class: 'item-main', type: 'button', 'data-action': 'play', title: item.kind === 'file' ? item.title : item.url },
+        el('button', {
+          class: 'item-main', type: 'button',
+          'data-action': missing ? 'reconnect' : 'play',
+          title: missing ? `Reconnect “${item.title}”` : (item.kind === 'file' ? item.title : item.url),
+        },
           el('span', { class: 'item-title', text: item.title }),
           el('span', { class: 'item-sub' },
             tag.label ? el('span', { class: `tag ${tag.cls}`, text: tag.label }) : null,
-            el('span', { text: item.kind === 'file' ? 'on this device' : (hostFromUrl(item.url) || 'url') }),
+            el('span', { text: missing ? 'saved — tap to reconnect' : item.kind === 'file' ? 'on this device' : (hostFromUrl(item.url) || 'url') }),
             item.duration ? el('span', { text: '· ' + fmtTime(item.duration) }) : null,
           ),
         ),
         el('div', { class: 'item-actions' },
+          missing
+            ? el('button', { class: 'icon-btn', type: 'button', 'data-action': 'reconnect', 'aria-label': `Reconnect ${item.title}`, title: 'Reconnect this file' }, icon('i-link'))
+            : null,
           el('button', { class: 'icon-btn', type: 'button', 'data-action': 'up', 'aria-label': `Move ${item.title} up`, title: 'Move up' }, icon('i-up')),
           el('button', { class: 'icon-btn', type: 'button', 'data-action': 'down', 'aria-label': `Move ${item.title} down`, title: 'Move down' }, icon('i-down')),
           el('button', { class: 'icon-btn danger', type: 'button', 'data-action': 'remove', 'aria-label': `Remove ${item.title}`, title: 'Remove' }, icon('i-close')),
@@ -2265,6 +2417,59 @@ const Playlist = {
       );
       list.append(li);
     });
+    const waiting = this.items.filter((it) => it.kind === 'file' && !it.file && !it.objectUrl).length;
+    const hint = $('#playlistReconnectHint');
+    if (hint) {
+      hint.hidden = waiting === 0;
+      hint.textContent = waiting === 0 ? '' : waiting === 1
+        ? '1 saved file needs reconnecting — the browser does not keep local files open between visits.'
+        : `${waiting} saved files need reconnecting — the browser does not keep local files open between visits.`;
+    }
+  },
+
+  /* ---------- reconnecting saved local files ---------- */
+
+  /** Saved local files that are waiting for the user to point at them again. */
+  get missingFiles() {
+    return this.items.filter((it) => it.kind === 'file' && !it.file && !it.objectUrl);
+  },
+
+  /**
+   * Open a file picker and re-link every saved file it can match.
+   * A browser cannot reopen a local file on its own — the user has to point at it
+   * once per visit — so the queue is kept and this is the one click that wakes it.
+   */
+  pickToReconnect(item = null) {
+    const input = $('#reconnectInput');
+    if (!input) return;
+    this._reconnectTarget = item?.id || null;
+    if (item) {
+      Toast.show(`Pick “${item.fileName || item.title}” again to keep watching`, 'info', 5000, 'reconnect');
+    } else {
+      Toast.show('Pick the folder or files again — matching titles reconnect automatically', 'info', 5000, 'reconnect');
+    }
+    input.click();
+  },
+
+  /** Match picked files against the saved placeholders (called by the input). */
+  reconnectFiles(files) {
+    const picked = Array.from(files || []);
+    if (!picked.length) return 0;
+    let linked = 0;
+    for (const file of picked) {
+      const entry = this.missingFiles.find((it) => this.sameLocalFile(it, file));
+      if (entry && this.attachFile(entry, file)) linked++;
+    }
+    if (linked) {
+      Toast.ok(linked === 1 ? 'Reconnected 1 file' : `Reconnected ${linked} files`, 3200, 'reconnect');
+      // If the row the user clicked is playable now, start it.
+      const target = this._reconnectTarget && this.items.find((it) => it.id === this._reconnectTarget);
+      this._reconnectTarget = null;
+      if (target && this.isPlayable(target)) this.play(target.id);
+    } else {
+      Toast.warn('None of those files match the saved entries — keep the same filenames to reconnect them', 6000, 'reconnect');
+    }
+    return linked;
   },
 };
 
@@ -4853,6 +5058,41 @@ const UI = {
    * user stopped — see `Resume` for how the position itself is remembered.
    */
   resumePromptDismissedFor: null,
+
+  /**
+   * The pop-up that greets a reopened app: “continue where you left off?”
+   *
+   * `renderResumePrompt` below keeps a copy of the offer on the empty state (so it
+   * is still one click away after the pop-up is dismissed); this is the modal that
+   * actually asks. It is offered at most once per launch — a dialog on every
+   * playlist re-render would be unbearable — and only when the previous session
+   * left a title open.
+   */
+  resumeDialogShown: false,
+  offerResumeDialog() {
+    const dlg = $('#resumeDialog');
+    const item = Playlist.lastWatched;
+    if (!dlg || !item || this.resumeDialogShown) return false;
+    this.resumeDialogShown = true;
+
+    const at = Resume.get(item);
+    const title = item.title || nameFromUrl(item.url || '') || 'Untitled';
+    const needsFile = item.kind === 'file' && !item.file && !item.objectUrl;
+    $('#resumeDialogTitle').textContent = at > 0 ? 'Continue watching?' : 'Pick up where you left off?';
+    $('#resumeDialogText').textContent = needsFile
+      ? `“${title}” was open when you closed the app. Reconnect the file to keep watching it.`
+      : at > 0
+        ? `“${title}” — you stopped at ${fmtTime(at)}.`
+        : `“${title}” was open when you closed the app.`;
+    $('#resumeDialogPlayLabel').textContent = needsFile ? 'Reconnect file' : at > 0 ? `Resume at ${fmtTime(at)}` : 'Play';
+    $('#resumeDialogHint').textContent = needsFile
+      ? 'Browsers never keep local files open between visits — one pick brings the queue back to life.'
+      : 'Resume picks it up where you stopped. Start over plays it from the beginning and forgets the saved position.';
+    dlg.dataset.itemId = item.id;
+    Shell.openDialog('#resumeDialog');
+    return true;
+  },
+
   renderResumePrompt() {
     const card = $('#resumePrompt');
     if (!card) return;
@@ -4918,6 +5158,24 @@ const App = {
     Sources.init();
     MovieSearch.init();
     Shell.init();
+
+    /* Save everything as soon as the app is backgrounded or closed.
+     * `pagehide` is the reliable one (it also fires when a phone kills the app);
+     * `beforeunload` is kept for desktop browsers that still lean on it. Both grab
+     * the current playback position and then flush the debounced localStorage
+     * writers, so nothing the user did in the last few hundred ms is lost.
+     * Registered before any `await`, so even a very first launch that is closed
+     * while the service worker is still installing writes its state out. */
+    const persistNow = () => {
+      Player.rememberPosition({ force: true });
+      flushPersisted();
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') persistNow();
+    });
+    window.addEventListener('pagehide', persistNow);
+    window.addEventListener('beforeunload', persistNow);
+
     await Offline.init();
 
     /* Respect a ?url= parameter so links can be shared/bookmarked. */
@@ -4930,6 +5188,8 @@ const App = {
       // The playlist is restored from localStorage, but we intentionally do not
       // preload anything — autoplay is blocked anyway and it would cost bandwidth.
       Player.showEmptyState();
+      // …but the title the last session left open is offered back in a pop-up.
+      UI.offerResumeDialog();
     }
 
     /* Ctrl/Cmd+V anywhere: paste a URL or subtitle text. */
@@ -4943,21 +5203,6 @@ const App = {
         Sources.loadFromInput({ play: true });
       }
     });
-
-    /* Save everything as soon as the app is backgrounded or closed.
-     * `pagehide` is the reliable one (it also fires when a phone kills the app);
-     * `beforeunload` is kept for desktop browsers that still lean on it. Both grab
-     * the current playback position and then flush the debounced localStorage
-     * writers, so nothing the user did in the last few hundred ms is lost. */
-    const persistNow = () => {
-      Player.rememberPosition({ force: true });
-      flushPersisted();
-    };
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') persistNow();
-    });
-    window.addEventListener('pagehide', persistNow);
-    window.addEventListener('beforeunload', persistNow);
 
     /* Register the service worker (PWA / offline downloads). */
     await this.registerServiceWorker();

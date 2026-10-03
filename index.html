@@ -454,6 +454,7 @@
         </div>
         <ul class="list" id="playlistList" aria-label="Playlist items"></ul>
         <p class="empty-note" id="playlistEmpty">Playlist is empty. Add a URL or local file.</p>
+        <p class="storage-note" id="playlistReconnectHint" hidden></p>
       </section>
 
       <section class="card card-grow" id="cardDownloads">
@@ -537,8 +538,25 @@
   </form>
 </dialog>
 
+<!-- Shown once per launch when the previous session left a title open. -->
+<dialog class="dialog resume-dialog" id="resumeDialog" aria-labelledby="resumeDialogTitle">
+  <div class="dialog-head">
+    <h2 id="resumeDialogTitle">Continue watching?</h2>
+    <button class="icon-btn sm" type="button" data-close-dialog aria-label="Not now"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="dialog-body">
+    <p class="resume-dialog-text" id="resumeDialogText"></p>
+    <p class="resume-dialog-hint" id="resumeDialogHint"></p>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn btn-ghost" id="btnResumeDialogRestart" type="button" title="Play from the beginning and forget the saved position">Start over</button>
+    <button class="btn btn-primary" id="btnResumeDialogPlay" type="button"><svg aria-hidden="true"><use href="#i-play"/></svg><span id="resumeDialogPlayLabel">Resume</span></button>
+  </div>
+</dialog>
+
 <!-- ===================== Hidden file inputs ===================== -->
 <input type="file" id="fileInput" accept="video/*,audio/*,.mp4,.webm,.m4v,.mov,.mkv,.ogv,.ogg,.mp3,.m4a,.aac,.flac,.wav,.m3u8,.mpd" multiple hidden />
+<input type="file" id="reconnectInput" accept="video/*,audio/*,.mp4,.webm,.m4v,.mov,.mkv,.ogv,.ogg,.mp3,.m4a,.aac,.flac,.wav,.m3u8,.mpd" multiple hidden />
 <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
 <input type="file" id="subtitleInput" accept=".vtt,.srt,.webvtt,.ttml,text/vtt" multiple hidden />
 <input type="file" id="playlistInput" accept=".json,application/json" hidden />
