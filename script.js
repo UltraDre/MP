@@ -100,9 +100,26 @@ function fmtBytes(bytes) {
   return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/**
+ * Trailing-edge debounce. The returned function also carries `.flush()`, which
+ * runs a queued call immediately — persistence helpers use it when the page is
+ * hidden or closed, so a write sitting in the debounce window is never lost.
+ */
 function debounce(fn, ms = 200) {
-  let t;
-  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  let t, args;
+  const run = () => {
+    clearTimeout(t);
+    const wasPending = t !== undefined;
+    t = undefined;
+    const callArgs = args;
+    args = undefined;
+    if (wasPending) fn(...callArgs);
+  };
+  return Object.assign((...a) => { args = a; clearTimeout(t); t = setTimeout(run, ms); }, {
+    /** Write now if a call is still queued (no-op when everything already landed). */
+    flush: () => { if (t !== undefined) run(); },
+    pending: () => t !== undefined,
+  });
 }
 function throttle(fn, ms = 100) {
   let last = 0, timer;
@@ -231,6 +248,23 @@ const Settings = {
   set(key, value) { this.data[key] = value; this.save(); return value; },
   get(key) { return this.data[key]; },
 };
+
+/**
+ * Push every debounced writer straight to localStorage.
+ *
+ * Settings, playlist and resume positions are all written through a short
+ * debounce so that bursts (importing a folder, re-sorting, timeupdate ticks)
+ * collapse into a single write. The trade-off is a few hundred milliseconds where
+ * the newest change only lives in memory — so the app also calls this whenever
+ * the page is hidden or closed. That is what makes "added to the playlist" and
+ * "where I stopped in the video" survive closing the app, even immediately after
+ * the change, and even if the browser drops a backgrounded tab.
+ */
+function flushPersisted() {
+  try { Settings.save.flush(); } catch (err) { console.warn('[persist] settings flush failed', err); }
+  try { Playlist.save.flush(); } catch (err) { console.warn('[persist] playlist flush failed', err); }
+  try { Resume.save.flush(); } catch (err) { console.warn('[persist] resume flush failed', err); }
+}
 
 /* =====================================================================
  * 03. UI HELPERS (toasts, dialogs, notices)
@@ -961,11 +995,13 @@ const Player = {
   hideEmptyState() {
     $('#emptyState').hidden = true;
     document.body.classList.remove('is-empty');
+    UI.renderResumePrompt();
   },
   showEmptyState() {
     this.hideSpinner();
     $('#emptyState').hidden = false;
     document.body.classList.add('is-empty');
+    UI.renderResumePrompt();
   },
 
   /** Show a friendly error card. Pass null to clear. */
@@ -1326,6 +1362,27 @@ const Controls = {
     /* --- empty state quick actions --- */
     $('#btnEmptyLocal').addEventListener('click', (e) => { e.stopPropagation(); $('#fileInput').click(); });
     $('#btnEmptySearch').addEventListener('click', (e) => { e.stopPropagation(); MovieSearch.open(); });
+
+    /* --- "continue where you left off" (the title the app was closed with) --- */
+    $('#btnResumePlay').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = $('#resumePrompt').dataset.itemId;
+      if (id) Playlist.play(id);
+      else UI.renderResumePrompt();
+    });
+    $('#btnResumeRestart').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = $('#resumePrompt').dataset.itemId;
+      const item = Playlist.items.find((it) => it.id === id);
+      if (!item) return;
+      Resume.clear(item);            // "start over" also forgets the stored position
+      Playlist.play(id);
+    });
+    $('#btnResumeDismiss').addEventListener('click', (e) => {
+      e.stopPropagation();
+      UI.resumePromptDismissedFor = $('#resumePrompt').dataset.itemId || null;
+      UI.renderResumePrompt();
+    });
 
     /* --- fullscreen state --- */
     document.addEventListener('fullscreenchange', () => {
@@ -1950,6 +2007,7 @@ const Playlist = {
     });
     $('#btnExportPlaylist').addEventListener('click', () => this.export());
     $('#btnImportPlaylist').addEventListener('click', () => $('#playlistInput').click());
+    $('#btnSortPlaylist').addEventListener('click', () => this.sortAlpha());
     $('#playlistInput').addEventListener('change', (e) => { this.import(e.target.files?.[0]); e.target.value = ''; });
   },
 
@@ -1967,7 +2025,11 @@ const Playlist = {
 
   save: debounce(function () {
     try {
-      localStorage.setItem(PLAYLIST_KEY, JSON.stringify({ version: 1, items: Playlist.serializable() }));
+      localStorage.setItem(PLAYLIST_KEY, JSON.stringify({
+        version: 1,
+        items: Playlist.serializable(),
+        currentId: Playlist.currentId || null,   // so a reopen knows what was last watched
+      }));
     } catch (err) { console.warn('[playlist] save failed', err); }
   }, 200),
 
@@ -1980,6 +2042,10 @@ const Playlist = {
       this.items = data.items
         .filter((it) => it && typeof it.url === 'string' && !it.url.startsWith('blob:'))
         .map((it) => ({ ...it, id: it.id || uid(), type: it.type || detectType(it.url, 'progressive') }));
+      // Restore the highlight on the title the app was last closed with, as long
+      // as that item is still in the list (local files are not persisted).
+      this.currentId = data.currentId && this.items.some((it) => it.id === data.currentId)
+        ? data.currentId : null;
     } catch (err) { console.warn('[playlist] load failed', err); }
   },
 
@@ -2039,6 +2105,24 @@ const Playlist = {
     to = this.indexOf(targetId) + (before ? 0 : 1);
     this.items.splice(to, 0, it);
     this.save(); this.render();
+  },
+
+  /**
+   * Sort the queue by title, A–Z, once. The result is saved like any other edit,
+   * so the order survives a reload, and manual reordering (↑/↓, drag) still works
+   * afterwards — the list is not re-sorted behind the user's back.
+   *
+   * Titles compare naturally, so "Episode 2" sorts before "Episode 10".
+   */
+  sortAlpha() {
+    if (this.items.length < 2) { Toast.show('Nothing to sort yet', 'info', 1600, 'sort'); return false; }
+    const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    const before = this.items.map((it) => it.id).join();
+    this.items = [...this.items].sort(byTitle);
+    this.save(); this.render();
+    if (this.items.map((it) => it.id).join() === before) Toast.show('Already sorted A–Z', 'info', 1600, 'sort');
+    else Toast.ok('Sorted A–Z');
+    return true;
   },
 
   clear() { this.items = []; this.save(); this.render(); },
@@ -2128,8 +2212,17 @@ const Playlist = {
   /* ---------- rendering ---------- */
 
   markCurrent(id) {
+    if (this.currentId === id) return;
     this.currentId = id;
+    // Remembered so that reopening the app knows which title to offer back.
+    this.save();
     $$('#playlistList .item').forEach((li) => li.classList.toggle('is-current', li.dataset.id === id));
+  },
+
+  /** The title the app was last closed on, or null (used by the resume prompt). */
+  get lastWatched() {
+    if (!this.currentId || Player.current) return null;
+    return this.items.find((it) => it.id === this.currentId) || null;
   },
 
   tagFor(item) {
@@ -2146,6 +2239,7 @@ const Playlist = {
     list.textContent = '';
     $('#playlistCount').textContent = String(this.items.length);
     $('#playlistEmpty').hidden = this.items.length > 0;
+    UI.renderResumePrompt();
 
     this.items.forEach((item, i) => {
       const tag = this.tagFor(item);
@@ -4749,6 +4843,34 @@ const Shell = {
  * ===================================================================*/
 
 const UI = {
+  /**
+   * The "continue where you left off" card on the empty state.
+   *
+   * On boot the app restores the playlist and the last watched title, but it
+   * deliberately does not fetch any media (autoplay is blocked and a silent
+   * download is rude). The card therefore offers the title back with its stored
+   * position, so reopening the app is one click away from picking up where the
+   * user stopped — see `Resume` for how the position itself is remembered.
+   */
+  resumePromptDismissedFor: null,
+  renderResumePrompt() {
+    const card = $('#resumePrompt');
+    if (!card) return;
+    const item = Playlist.lastWatched;
+    if (!item || item.id === this.resumePromptDismissedFor) {
+      card.hidden = true;
+      card.dataset.itemId = '';
+      return;
+    }
+    const at = Resume.get(item);
+    const title = item.title || nameFromUrl(item.url || '') || 'Untitled';
+    $('#resumePromptText').textContent = at > 0
+      ? `Last open: ${title} — stopped at ${fmtTime(at)}`
+      : `Last open: ${title}`;
+    card.dataset.itemId = item.id;
+    card.hidden = false;
+  },
+
   renderCurrentTitle(item) {
     if (!item) {
       $('#nowPlayingTitle').textContent = '—';
@@ -4822,11 +4944,20 @@ const App = {
       }
     });
 
-    /* Persist the resume point when the tab goes away. */
+    /* Save everything as soon as the app is backgrounded or closed.
+     * `pagehide` is the reliable one (it also fires when a phone kills the app);
+     * `beforeunload` is kept for desktop browsers that still lean on it. Both grab
+     * the current playback position and then flush the debounced localStorage
+     * writers, so nothing the user did in the last few hundred ms is lost. */
+    const persistNow = () => {
+      Player.rememberPosition({ force: true });
+      flushPersisted();
+    };
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') Player.rememberPosition();
+      if (document.visibilityState === 'hidden') persistNow();
     });
-    window.addEventListener('beforeunload', () => Player.rememberPosition());
+    window.addEventListener('pagehide', persistNow);
+    window.addEventListener('beforeunload', persistNow);
 
     /* Register the service worker (PWA / offline downloads). */
     await this.registerServiceWorker();
