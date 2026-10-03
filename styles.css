@@ -459,6 +459,9 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
 .resume-prompt-actions .btn { min-height: 36px; padding: 6px 12px; font-size: .84rem; }
 .resume-prompt-actions .btn-primary { color: #fff; }
 .resume-prompt-actions .btn-ghost { color: #eef2ff; background: rgba(255, 255, 255, .06); }
+/* The card is always dark (like the control bar), so its glyphs must not follow --text. */
+.resume-prompt-actions .icon-btn { color: #c3cce8; }
+.resume-prompt-actions .icon-btn:hover { color: #fff; background: rgba(255, 255, 255, .12); }
 
 .error-box svg { width: 40px; height: 40px; color: var(--danger); }
 .error-title { font-weight: 700; font-size: 1.02rem; }
