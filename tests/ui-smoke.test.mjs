@@ -108,6 +108,8 @@ check('theme applied to <html>', ['dark', 'light'].includes(document.documentEle
 check('PiP hidden in jsdom (unsupported)', $('#btnPip').hidden === true);
 check('video requests eager preloading by default', $('#video').preload === 'auto', $('#video').preload);
 check('empty state visible on first run', $('#emptyState').hidden === false);
+check('no "continue where you left off" card on a first run', $('#resumePrompt').hidden === true);
+check('the playlist toolbar offers an alphabetical sort', $('#btnSortPlaylist') !== null);
 check('movie search replaced the scan-site controls', $('#btnEmptySearch') !== null && $('#btnSearchMovies') !== null
   && $('#btnEmptyScan') === null && $('#btnScanSite') === null);
 check('buffering spinner is hidden on first run', $('#spinner').hidden === true);
@@ -753,6 +755,72 @@ video.dispatchEvent(new window.Event('play'));   // stops the keep-alive timer
 await wait(300);                                 // settings writes are debounced
 check('the option is stored in settings',
   JSON.parse(window.localStorage.getItem('nebula.settings.v1')).prebufferWhilePaused === true);
+
+console.log('\n— playlist sorting —');
+const rows = () => [...document.querySelectorAll('#playlistList .item')];
+const titles = () => rows().map((li) => li.querySelector('.item-title').textContent);
+// local files are deliberately never persisted, so compare against the saved subset
+const savedTitles = () => (JSON.parse(window.localStorage.getItem('nebula.playlist.v1')) || { items: [] }).items.map((i) => i.title);
+const onDiskTitles = () => rows().filter((li) => !li.querySelector('.tag-file')).map((li) => li.querySelector('.item-title').textContent);
+const click = (sel) => $(sel).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const queueUrl = (u) => {
+  urlInput.value = u;
+  $('#btnQueueUrl').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+};
+const added = ['Zebra.mp4', 'Episode 10.mp4', 'Apple.mp4', 'Episode 2.mp4'];
+added.forEach((t) => queueUrl('https://cdn.example.com/' + encodeURIComponent(t)));
+await wait(60);
+check('items stay in the order they were added (sorting is opt-in)',
+  titles().slice(-added.length).join('|') === added.join('|'), titles().slice(-added.length).join('|'));
+click(`#playlistList .item:nth-child(${titles().indexOf('Apple.mp4') + 1}) .item-main`);   // make one row current
+await wait(60);
+click('#btnSortPlaylist');
+await wait(60);
+const sorted = titles();
+const at = (t) => sorted.indexOf(t);
+check('Sort A–Z puts the queue in alphabetical order',
+  at('Apple.mp4') < at('Episode 10.mp4') && at('Episode 10.mp4') < at('Zebra.mp4'), sorted.join('|'));
+check('numbered titles sort naturally, not character by character (2 before 10)',
+  at('Episode 2.mp4') < at('Episode 10.mp4'), sorted.join('|'));
+check('the playing row keeps its highlight through a sort',
+  document.querySelector('#playlistList .item.is-current .item-title')?.textContent === 'Apple.mp4',
+  String(document.querySelector('#playlistList .item.is-current .item-title')?.textContent));
+await wait(300);
+check('the sorted order is what gets saved', savedTitles().join('|') === onDiskTitles().join('|'),
+  `${savedTitles().join('|')} vs ${onDiskTitles().join('|')}`);
+const movedFrom = titles();
+const appleRow = movedFrom.indexOf('Apple.mp4') + 1;
+click(`#playlistList .item:nth-child(${appleRow}) [data-action="down"]`);
+await wait(60);
+const moved = titles();
+check('manual reordering still works after a sort',
+  moved[appleRow - 1 + 1] === 'Apple.mp4' && moved[appleRow - 1] === movedFrom[appleRow],
+  `${movedFrom.join('|')} → ${moved.join('|')}`);
+await wait(300);
+check('the manual order is saved too — nothing re-sorts behind the user',
+  savedTitles().join('|') === onDiskTitles().join('|'), `${savedTitles().join('|')} vs ${onDiskTitles().join('|')}`);
+click('#btnSortPlaylist');
+await wait(60);
+check('pressing Sort A–Z again restores alphabetical order', titles().join('|') === sorted.join('|'), titles().join('|'));
+
+console.log('\n— saving on close —');
+urlInput.value = 'https://cdn.example.com/added-then-closed.mp4';
+$('#urlForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));   // add + play
+video._duration = 600;
+video.currentTime = 333;                          // …and walk away mid-playback
+check('the newest item is not on disk yet (its write is debounced)',
+  !savedTitles().includes('added-then-closed.mp4'), savedTitles().join('|'));
+window.dispatchEvent(new window.Event('pagehide'));   // no waiting for the debounce
+const closed = JSON.parse(window.localStorage.getItem('nebula.playlist.v1'));
+check('pagehide flushes the queued playlist write', closed.items.some((i) => i.title === 'added-then-closed.mp4'),
+  JSON.stringify(closed.items.map((i) => i.title)));
+check('pagehide also stores which title was open',
+  closed.currentId === (closed.items.find((i) => i.title === 'added-then-closed.mp4') || {}).id,
+  `${closed.currentId} vs ${JSON.stringify(closed.items.map((i) => [i.id, i.title]))}`);
+const closedMarks = JSON.parse(window.localStorage.getItem('nebula.resume.v1')).items;
+check('pagehide flushes the playback position',
+  Math.abs((closedMarks['url:https://cdn.example.com/added-then-closed.mp4'] || {}).t - 333) < 0.01,
+  JSON.stringify(closedMarks).slice(0, 240));
 
 console.log('\n— errors —');
 const realErrors = logs.errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom|Could not load script|resource/i.test(e));

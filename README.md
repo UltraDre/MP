@@ -46,6 +46,8 @@ No frameworks, no build step, no bundler — open it from any static server and 
   you stopped and re-opens there (a title you watched to the end starts over). Marks are keyed by the
   media URL in `localStorage`, so they survive reloads, playlist re-imports and switching between the
   streaming and downloaded copy of the same video; local files keep theirs for the session.
+  The position is refreshed every ~10 s while playing and saved again on pause, on seek and when the app
+  is hidden or closed, so quitting mid-playback costs at most a few seconds of progress.
 
 **Sources**
 
@@ -73,10 +75,17 @@ No frameworks, no build step, no bundler — open it from any static server and 
 **Playlist**
 
 - Add online URLs and local files, switch between items, reorder (drag-and-drop or ↑/↓ buttons),
-  remove items, clear the list, import/export as JSON. The playlist survives reloads (local files are
-  intentionally not persisted — browsers do not allow it — but they stay available for the session).
+  remove items, clear the list, import/export as JSON, or press **Sort A–Z** to order the whole queue
+  by title (naturally, so *Episode 2* comes before *Episode 10*). The sort is a one-off: the result is
+  saved like any other edit and manual reordering still works afterwards.
+- **Everything is saved automatically.** The queue, its order and the current item are written to
+  `localStorage` as you change them, and every pending write is flushed the moment the tab is hidden or
+  the app is closed — adding something and immediately quitting does not lose it. Local files are the one
+  exception (browsers do not allow a file handle to be persisted), but they stay available for the session.
 - Selecting an item always resumes the position where you last stopped watching it, including after a
-  reload of the app.
+  reload of the app. After a restart the empty state also shows a **“Last open” card** with the title you
+  closed on and where you stopped: **Resume** picks it up there, **Start over** plays it from 0 and
+  forgets the mark.
 
 **Subtitles**
 
@@ -94,7 +103,9 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 - Installable (manifest + service worker), works offline for the UI itself, dark/light theme,
   responsive layout (sidebar becomes a bottom sheet on phones), toasts, keyboard-shortcut dialog,
-  and localStorage persistence for theme, volume, speed, loop/shuffle, subtitle preferences and playlist.
+  and localStorage persistence for theme, volume, speed, loop/shuffle, subtitle preferences, the playlist,
+  the last open title and every resume position. Writes are debounced and flushed on `pagehide` / when the
+  tab is hidden, so closing the app never loses the change you just made.
 
 ---
 
@@ -141,7 +152,8 @@ MP/
 ├── tests/              # optional Node harnesses (not needed to run the app)
 │   ├── static-checks.mjs
 │   ├── service-worker.test.mjs
-│   └── ui-smoke.test.mjs
+│   ├── ui-smoke.test.mjs
+│   └── persistence.test.mjs   # boots the app on top of a saved state
 └── README.md
 ```
 
@@ -151,13 +163,13 @@ The file is split into numbered sections so you can jump straight to what you ne
 
 | § | Section | Responsibility |
 |---|---------|----------------|
-| 01–04 | Utilities, Settings, Toasts, Media helpers | formatting, localStorage, dialogs, format detection |
+| 01–04 | Utilities, Settings, Toasts, Media helpers | formatting, localStorage (+ `flushPersisted()`), dialogs, format detection |
 | 05 | `StreamEngine` | loads hls.js/dash.js on demand and attaches streams |
 | 06 | `Player` + `Resume` | the core playback controller (`load()`, seeking, volume, errors) and the persistent resume-position store |
 | 07 | `MediaSession` | OS media keys / lock-screen metadata |
 | 08–09 | `Controls`, `Menus` | control bar binding, speed menu, popups |
 | 10–11 | `Gestures`, `Keyboard` | double-tap/double-click gestures & shortcuts |
-| 12 | `Playlist` | queue, reordering, persistence, import/export |
+| 12 | `Playlist` | queue, reordering, alphabetical sort, persistence, import/export |
 | 13 | `Offline` | talking to the service worker, downloads UI |
 | 14 | `Subtitles` | VTT/SRT tracks, delay, embedded tracks |
 | 15 | `SubtitleSearch` | online search (OpenSubtitles/Stremio), `Net` fetch helper, proxies |
@@ -208,12 +220,24 @@ You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
 ### 4. Playlist
 
 Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or drag the row) to reorder,
-✕ to remove, the header buttons to import/export/clear. **Export** writes a JSON file you can share;
+✕ to remove, the header buttons to sort/import/export/clear. **Export** writes a JSON file you can share;
 **Import** merges a JSON playlist back in.
+
+**Sort A–Z** (the ↓-of-bars button in the playlist header) orders the whole queue by title once — case
+insensitive and natural, so `Episode 2.mp4` sorts before `Episode 10.mp4`. It does not lock the order: the
+sorted result is saved and ↑/↓ or dragging still rearrange rows afterwards; press the button again to
+re-alphabetise.
+
+Everything you do here is saved for you. Additions, moves, sorts and removals are written to `localStorage`
+within a few hundred milliseconds, and any write still in that window is flushed when the tab is hidden or
+the app is closed — so you can queue a URL and quit immediately. (Local files are the exception: browsers
+will not remember a file handle between sessions.)
 
 Clicking an item re-opens it **where you left off** (a “Resumed at …” toast confirms the position). That
 works for streamed, downloaded and local files, across app reloads, and a title that was watched to the
 end starts from the beginning next time. Playing a fifth of a video or longer is what creates the mark.
+Nothing is fetched or played on boot; instead the empty state shows the **last open** title with its stored
+position, with **Resume** / **Start over** / dismiss buttons.
 
 ### 5. Subtitles — local files and online search
 
@@ -445,6 +469,9 @@ These are inherent to a browser-based player (no backend, no DRM):
 15. **Resume positions live in this browser** (`localStorage`, max 300 entries/6 months, pruned
     automatically). Clearing site data or using private windows starts everything from the beginning.
     A title you watched to within ~2 % of its end (at least 5 s, at most 30 s) is treated as finished.
+    A position is written on pause, on seek, roughly every 10 s during playback and when the app is
+    hidden or closed — so a browser that is killed outright (no `pagehide` at all) can lose the last few
+    seconds of a *playing* video; the queue itself is written within 200 ms of the change.
 
 ---
 
@@ -527,7 +554,8 @@ The app itself needs **no build step and no dependencies**. Three optional harne
 node tests/static-checks.mjs          # ids, sprite references, asset paths, manifest, syntax sanity
 node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ranges, downloads
 npm install --no-save jsdom           # only for the UI test
-node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/gestures/playlist/movie-search/page-scan/subtitle-search
+node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/gestures/playlist/sorting/movie-search/page-scan/subtitle-search
+node tests/persistence.test.mjs       # boots the app on top of a saved state: queue, order, last open title, resume marks, save-on-close
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest
@@ -540,8 +568,11 @@ node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/g
   (mocked Internet Archive, Wikimedia Commons and SepiaSearch/PeerTube backends, licence filtering,
   direct-URL resolution and the catalogue picker), subtitles, the online subtitle search (with a mocked
   OpenSubtitles/Stremio backend, language filters and one-click loading), resume-position persistence
-  across item switches and the paused forward-buffer policy (through a fake hls.js instance) plus
-  localStorage persistence.
+  across item switches, the alphabetical playlist sort and the paused forward-buffer policy (through a fake
+  hls.js instance) plus localStorage persistence.
+- `persistence.test.mjs` boots the app *on top of* a `localStorage` state from a previous session and checks
+  what comes back (queue, saved order, highlighted last title, resume position, the “continue where you
+  left off” card) and that `pagehide` / hiding the tab flushes debounced writes instead of losing them.
 
 ---
 
