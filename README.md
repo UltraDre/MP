@@ -45,7 +45,8 @@ No frameworks, no build step, no bundler — open it from any static server and 
 - Loading spinner, friendly error cards with retry, and **resume positions**: every item remembers where
   you stopped and re-opens there (a title you watched to the end starts over). Marks are keyed by the
   media URL in `localStorage`, so they survive reloads, playlist re-imports and switching between the
-  streaming and downloaded copy of the same video; local files keep theirs for the session.
+  streaming and downloaded copy of the same video; local files are keyed by name + size + modified date,
+  so they survive a restart as well and are still there once the file is reconnected.
   The position is refreshed every ~10 s while playing and saved again on pause, on seek and when the app
   is hidden or closed, so quitting mid-playback costs at most a few seconds of progress.
 
@@ -78,14 +79,19 @@ No frameworks, no build step, no bundler — open it from any static server and 
   remove items, clear the list, import/export as JSON, or press **Sort A–Z** to order the whole queue
   by title (naturally, so *Episode 2* comes before *Episode 10*). The sort is a one-off: the result is
   saved like any other edit and manual reordering still works afterwards.
-- **Everything is saved automatically.** The queue, its order and the current item are written to
-  `localStorage` as you change them, and every pending write is flushed the moment the tab is hidden or
-  the app is closed — adding something and immediately quitting does not lose it. Local files are the one
-  exception (browsers do not allow a file handle to be persisted), but they stay available for the session.
+- **Everything is saved automatically, and stays until you delete it.** The queue, its order and the
+  item you are watching are written to `localStorage` as you change them, and every pending write is
+  flushed the moment the tab is hidden or the app is closed — adding something and immediately quitting
+  does not lose it, and closing the app never empties the playlist.
+- **Local files stay in the queue too.** A browser will not hand a file back to a page that did not just
+  open it, so a local file is saved by *identity* (name, size, last-modified) instead of being dropped:
+  after a restart its row, its order and its resume position are all still there, marked
+  **“saved — tap to reconnect”**. One pick of the file (or of its folder) re-links every matching row.
+  The file's contents are never copied into storage.
 - Selecting an item always resumes the position where you last stopped watching it, including after a
-  reload of the app. After a restart the empty state also shows a **“Last open” card** with the title you
-  closed on and where you stopped: **Resume** picks it up there, **Start over** plays it from 0 and
-  forgets the mark.
+  reload of the app. Reopening the app shows a **“Continue watching?” pop-up** naming the title you closed
+  on and where you stopped: **Resume** picks it up there, **Start over** plays it from 0 and forgets the
+  mark, and dismissing it leaves the same offer on the empty state as a **“Last open” card**.
 
 **Subtitles**
 
@@ -169,7 +175,7 @@ The file is split into numbered sections so you can jump straight to what you ne
 | 07 | `MediaSession` | OS media keys / lock-screen metadata |
 | 08–09 | `Controls`, `Menus` | control bar binding, speed menu, popups |
 | 10–11 | `Gestures`, `Keyboard` | double-tap/double-click gestures & shortcuts |
-| 12 | `Playlist` | queue, reordering, alphabetical sort, persistence, import/export |
+| 12 | `Playlist` | queue, reordering, alphabetical sort, persistence, reconnecting saved local files, import/export |
 | 13 | `Offline` | talking to the service worker, downloads UI |
 | 14 | `Subtitles` | VTT/SRT tracks, delay, embedded tracks |
 | 15 | `SubtitleSearch` | online search (OpenSubtitles/Stremio), `Net` fetch helper, proxies |
@@ -450,8 +456,11 @@ These are inherent to a browser-based player (no backend, no DRM):
    The app asks you to press play instead of failing silently.
 8. **iOS specifics** — background playback, PiP and fullscreen behaviour are controlled by iOS;
    `webkitEnterFullscreen` is used as a fallback. Picture-in-picture may be unavailable.
-9. **Local files are session-only** — a `File` cannot be re-opened after a reload (the browser will not
-   hand back the handle without the File System Access API). Downloads are persisted normally.
+9. **Local files must be reconnected once per visit** — the *queue entry* is saved (name, size, modified
+   date, order and resume position), but a browser will not hand the file itself back to a page that did
+   not just open it, so playing it after a restart needs one pick of the file or its folder. Renaming,
+   moving or re-encoding the file breaks the match. Downloads are persisted normally and play with no
+   re-picking at all.
 10. **Subtitle delay** is applied by shifting cue times in memory; it is not re-encoded into the file.
 11. **Cross-origin subtitles** are only auto-discovered when the host allows it; otherwise use the
     “Load .vtt / .srt file” button or the online search.
@@ -491,7 +500,8 @@ These are inherent to a browser-based player (no backend, no DRM):
 | Movie search finds nothing | The search covers Internet Archive, Wikimedia Commons and PeerTube — not commercial streaming services, torrent sites or the whole web. Try the title's original spelling (or just the series name), switch the *Catalogue* picker to *All catalogues*, or browse a record for alternative names. Only records with a declared Creative Commons/public-domain licence and a direct video file are shown — a title whose upload has no licence or no playable file is skipped on purpose. |
 | Movie search cannot connect | Check the connection and retry; the status line names which catalogue failed. The search reads the catalogues' public JSON APIs directly, so browser extensions, DNS filters or offline mode can block individual sources — the others still deliver results. |
 | A search returns “PeerTube … could not be reached” | Some PeerTube instances are offline or block cross-origin reads. PeerTube rows need one extra request (the instance's API) to find the direct file; simply retry, or narrow the picker to another catalogue. |
-| Video starts again from the beginning instead of resuming | The video is shorter than 5 s, it was watched to the end (then starting over is intentional), it is a live stream, or the site data was cleared. Local files only keep their position for the current session. |
+| Video starts again from the beginning instead of resuming | The video is shorter than 5 s, it was watched to the end (then starting over is intentional), it is a live stream, or the site data was cleared. A local file also has to be reconnected first (see below). |
+| The playlist is there but a local file will not play | Browsers never keep a local file open between visits, so the row comes back as **“saved — tap to reconnect”**. Click it (or the link icon) and pick the file or its folder again — rows are matched by name, size and modified date, so one pick can reconnect the whole queue. Renaming or re-encoding the file breaks the match; remove the row and add it again. |
 | Nothing is downloaded while the video is paused | Progressive MP4/WebM playback is buffered by the browser itself, which stops after its own internal limit regardless of the page. HLS/DASH streams are expanded while paused — check *Keep downloading ahead while paused* is on (shortcut dialog) and that the host is not rate-limiting. |
 | Online subtitle search finds nothing | The name must match a release on OpenSubtitles — try a shorter title, clear the language filter or switch it to *Any language*. The status line names the source that failed and why. |
 | Search says “blocked by CORS” | The host refused the browser request. Enable **Retry blocked requests** in *More options* (uses a public proxy), or paste a direct subtitle link / load the file manually. |
@@ -555,7 +565,7 @@ node tests/static-checks.mjs          # ids, sprite references, asset paths, man
 node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ranges, downloads
 npm install --no-save jsdom           # only for the UI test
 node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/gestures/playlist/sorting/movie-search/page-scan/subtitle-search
-node tests/persistence.test.mjs       # boots the app on top of a saved state: queue, order, last open title, resume marks, save-on-close
+node tests/persistence.test.mjs       # close/reopen round trips: queue, order, highlight, resume pop-up, saved local files, save-on-close
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest
@@ -573,6 +583,11 @@ node tests/persistence.test.mjs       # boots the app on top of a saved state: q
 - `persistence.test.mjs` boots the app *on top of* a `localStorage` state from a previous session and checks
   what comes back (queue, saved order, highlighted last title, resume position, the “continue where you
   left off” card) and that `pagehide` / hiding the tab flushes debounced writes instead of losing them.
+  It also runs whole sessions end to end — import a playlist, watch it, close the app, boot again on
+  exactly the storage that session wrote — and asserts the queue, the highlight on the watched title, the
+  “Continue watching?” pop-up and its Resume/Start-over buttons, that a queue of local files survives by
+  identity and reconnects with one pick, and that the app still boots when the service worker serves an
+  older `index.html` alongside a newer `script.js`.
 
 ---
 

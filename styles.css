@@ -850,6 +850,11 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 }
 .item:hover { background: var(--surface-3); }
 .item.is-current { border-color: var(--accent); background: var(--accent-soft); }
+/* A local file that is saved in the queue but not re-linked yet (a browser cannot
+   keep a file handle across visits — one pick brings it back). */
+.item.is-missing { border-style: dashed; border-color: var(--line-strong); opacity: .82; }
+.item.is-missing .item-title { font-weight: 500; }
+.item.is-missing.is-current { border-color: var(--accent); opacity: 1; }
 .item.is-dragging { opacity: .45; }
 .item.drop-before { box-shadow: 0 -2px 0 0 var(--accent-2) inset, 0 0 0 1px var(--accent-2); }
 .item.drop-after { box-shadow: 0 2px 0 0 var(--accent-2) inset, 0 0 0 1px var(--accent-2); }
@@ -957,6 +962,12 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 .dialog-body { padding: 16px; overflow: auto; max-height: 66dvh; }
 .dialog-body h3 { font-size: .92rem; margin: 18px 0 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+
+/* The "continue watching?" pop-up shown when the app is reopened. */
+.resume-dialog { width: min(460px, calc(100vw - 32px)); }
+.resume-dialog .dialog-body { display: grid; gap: 8px; }
+.resume-dialog-text { font-size: .95rem; font-weight: 600; line-height: 1.45; }
+.resume-dialog-hint { font-size: .79rem; color: var(--text-dim); line-height: 1.45; }
 .kbd-grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; align-items: center; font-size: .88rem; }
 .kbd-grid > span:nth-child(odd) { text-align: right; color: var(--text-dim); white-space: nowrap; }
 kbd {

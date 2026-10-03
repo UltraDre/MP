@@ -312,9 +312,17 @@ check('local file added to the playlist', document.querySelectorAll('#playlistLi
   String(document.querySelectorAll('#playlistList .item').length));
 check('local file played (empty state hidden)', $('#emptyState').hidden === true);
 check('local item tagged as LOCAL', $('#sourceBadge').textContent === 'LOCAL', $('#sourceBadge').textContent);
-const localItem = window.localStorage.getItem('nebula.playlist.v1');
 await wait(300);
-check('local files are not persisted to localStorage', !localItem.includes('clip.mp4'), 'playlist:' + localItem);
+const storedQueue = () => (JSON.parse(window.localStorage.getItem('nebula.playlist.v1')) || { items: [] }).items;
+const savedLocal = storedQueue().find((i) => i.kind === 'file');
+check('a local file is saved by identity, so its queue slot survives a restart',
+  !!savedLocal && savedLocal.file?.name === 'clip.mp4' && savedLocal.file?.size === 8
+  && Number(savedLocal.file?.lastModified) > 0,
+  JSON.stringify(savedLocal));
+check('…without storing the file itself (no blob URL, no bytes)',
+  !/blob:/.test(window.localStorage.getItem('nebula.playlist.v1') || '')
+  && !/data:/.test(window.localStorage.getItem('nebula.playlist.v1') || ''),
+  String(window.localStorage.getItem('nebula.playlist.v1')).slice(0, 220));
 check('sidecar .srt was converted and attached', document.querySelectorAll('#subtitleTracks li').length >= 1,
   document.querySelectorAll('#subtitleTracks li').length + ' tracks');
 
@@ -759,9 +767,10 @@ check('the option is stored in settings',
 console.log('\n— playlist sorting —');
 const rows = () => [...document.querySelectorAll('#playlistList .item')];
 const titles = () => rows().map((li) => li.querySelector('.item-title').textContent);
-// local files are deliberately never persisted, so compare against the saved subset
+// every row is persisted now (local files by identity), so saved order and the
+// order on screen must match exactly — nothing may be dropped or re-sorted
 const savedTitles = () => (JSON.parse(window.localStorage.getItem('nebula.playlist.v1')) || { items: [] }).items.map((i) => i.title);
-const onDiskTitles = () => rows().filter((li) => !li.querySelector('.tag-file')).map((li) => li.querySelector('.item-title').textContent);
+const onDiskTitles = () => rows().map((li) => li.querySelector('.item-title').textContent);
 const click = (sel) => $(sel).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 const queueUrl = (u) => {
   urlInput.value = u;
