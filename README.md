@@ -34,7 +34,7 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 **Playback**
 
-- Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute, fullscreen, picture-in-picture,
+- Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute with a 0–200% software-gain range, fullscreen, picture-in-picture,
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
 - **Rotate the screen** with the ↻ button or <kbd>Shift</kbd>+<kbd>R</kbd>: switch between portrait
   and landscape with the video, controls and overlays together (supported mobile browsers).
@@ -112,6 +112,7 @@ No frameworks, no build step, no bundler — open it from any static server and 
   free API key). Results are language-tagged, ranked and can be loaded with one click or saved as
   `.srt`. You can also search any name you type, paste a subtitle link, or open a local file.
 - In-band/embedded text tracks (e.g. HLS captions) also appear in the list.
+- The **Subtitle appearance** section adjusts cue size, text color, background color/opacity and vertical position; these preferences are saved on the device.
 
 **App / PWA**
 
@@ -288,6 +289,9 @@ auto-rotate enabled instead. This includes browsers that expose the API but reje
 
 - **Load .vtt / .srt file** adds tracks by hand; dropped subtitle files and sidecar files next to a
   local video are picked up automatically. SRT is converted to WebVTT in memory.
+- Expand **Subtitle appearance** in the CC panel to change subtitle size, text color, background
+  color and opacity, and height above the bottom edge. The controls apply to external and embedded cues,
+  and **Reset appearance** restores the defaults.
 - **Search online…** (also <kbd>Shift</kbd>+<kbd>C</kbd>) opens the search dialog:
   1. The name of the current video is prefilled — for a file like `Show.S02E04.1080p.WEB-DL.mkv` the
      query becomes *Show* with season 2 / episode 4 filled in. You can type any other name instead.
@@ -314,7 +318,7 @@ auto-rotate enabled instead. This includes browsers that expose the API but reje
 | Gesture | Action |
 |---------|--------|
 | **Swipe left / right** across the video (mobile) | Seek backward / forward continuously (about 0.1 s per horizontal pixel) |
-| **Swipe up / down** across the video (mobile) | Raise / lower volume (a full stage-height swipe spans the volume range) |
+| **Swipe up / down** across the video (mobile) | Raise / lower volume (a full stage-height swipe spans 0–200%) |
 | **Double-tap** the video area (mobile) | Play / pause (completely silent — no icon or text is shown) |
 | **Double-click** the video area (desktop) | Play / pause (completely silent — no icon or text is shown) |
 | **Single tap / click** the video area | Show / hide the control bar |
@@ -524,6 +528,10 @@ These are inherent to a browser-based player (no backend, no DRM):
     seconds of a *playing* video; the queue itself is written within 200 ms of the change.
 16. **Screen rotation depends on browser support** — unsupported browsers require physical phone
     rotation with auto-rotate enabled. It does not modify downloaded videos or PiP windows.
+17. **Volume above 100% uses Web Audio gain** — browser security only permits processing local or
+    same-origin media in this player. Cross-origin streams stay at 100% (the player leaves their native
+    audio path untouched). Web pages cannot change the phone's OS/hardware volume; use the device buttons
+    for that.
 
 ---
 

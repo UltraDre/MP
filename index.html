@@ -8,8 +8,8 @@
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json" />
-<meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)" />
-<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#101114" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)" />
 <meta name="color-scheme" content="dark light" />
 <link rel="icon" href="icons/favicon-32.png" sizes="32x32" />
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
@@ -235,8 +235,8 @@
                 <svg class="ic-vl" aria-hidden="true"><use href="#i-vol-low"/></svg>
                 <svg class="ic-vm" aria-hidden="true"><use href="#i-vol-mute"/></svg>
               </button>
-              <input type="range" id="volume" class="volume" min="0" max="1" step="0.01" value="1"
-                     aria-label="Volume" title="Volume (↑ / ↓)" />
+              <input type="range" id="volume" class="volume" min="0" max="200" step="1" value="100"
+                     aria-label="Volume" aria-valuetext="100%" title="Volume — up to 200% (↑ / ↓)" />
               <output class="volume-out" id="volumeOut" aria-hidden="true">100%</output>
             </div>
           </div>
@@ -304,6 +304,33 @@
             <button class="icon-btn sm" id="btnSubtitleDelayPlus" type="button" aria-label="Subtitles 0.5s later">+</button>
           </div>
         </div>
+        <details class="subtitle-settings" id="subtitleAppearance">
+          <summary>Subtitle appearance</summary>
+          <div class="subtitle-settings-fields">
+            <label class="field">
+              <span>Size <output id="subtitleSizeOut">100%</output></span>
+              <input type="range" id="subtitleSize" min="50" max="200" step="5" value="100" aria-label="Subtitle size" />
+            </label>
+            <label class="field subtitle-color-field">
+              <span>Text color</span>
+              <input type="color" id="subtitleColor" value="#ffffff" aria-label="Subtitle text color" />
+            </label>
+            <label class="field subtitle-color-field">
+              <span>Background color</span>
+              <input type="color" id="subtitleBackgroundColor" value="#000000" aria-label="Subtitle background color" />
+            </label>
+            <label class="field">
+              <span>Background opacity <output id="subtitleBackgroundOpacityOut">75%</output></span>
+              <input type="range" id="subtitleBackgroundOpacity" min="0" max="100" step="5" value="75" aria-label="Subtitle background opacity" />
+            </label>
+            <label class="field subtitle-position-field">
+              <span>Position above bottom <output id="subtitlePositionOut">8%</output></span>
+              <input type="range" id="subtitlePosition" min="0" max="40" step="1" value="8" aria-label="Subtitle vertical position above bottom" />
+            </label>
+            <button class="btn btn-ghost subtitle-reset" id="btnSubtitleResetAppearance" type="button">Reset appearance</button>
+          </div>
+          <p class="subtitle-settings-hint">Position is the vertical distance up from the bottom edge. Changes apply to embedded and loaded subtitle tracks.</p>
+        </details>
         <p class="sheet-hint">SRT files are converted to WebVTT automatically. <strong>Search online</strong> looks the video up on OpenSubtitles and other sources. Sidecar <code>.vtt</code> files next to a local video are added automatically.</p>
       </div>
 

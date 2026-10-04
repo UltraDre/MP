@@ -212,7 +212,7 @@ const PLAYLIST_KEY = 'nebula.playlist.v1';
 const Settings = {
   data: {
     theme: null,            // 'dark' | 'light' | null (= follow system)
-    volume: 1,
+    volume: 1,              // 0–2 (0–200%); Web Audio gain handles boosts above 100%
     muted: false,
     speed: 1,
     preservePitch: true,
@@ -220,6 +220,11 @@ const Settings = {
     shuffle: false,
     captionsEnabled: true,  // do we auto-show available subtitle tracks?
     subtitleDelay: 0,
+    subtitleSize: 100,      // percent of the browser's default cue size
+    subtitleColor: '#ffffff',
+    subtitleBackgroundColor: '#000000',
+    subtitleBackgroundOpacity: 75, // percent
+    subtitlePosition: 8,    // vertical offset above the bottom edge, in percent
     seekZones: false,       // double-tap left/right third = ±10s (opt-in)
     prebufferWhilePaused: true, // keep downloading ahead while playback is paused
     movieSearchSource: 'all',   // movie search catalogue: 'all' | provider id
@@ -829,6 +834,14 @@ const Player = {
   video: null,
   current: null,        // active media item
   objectUrls: new Set(),// blob urls we must revoke
+  volumeLevel: 1,       // app volume, 0–2 (0–200%); media.volume itself is capped at 1
+  audioContext: null,
+  audioSource: null,
+  audioGain: null,
+  audioGraphVideo: null,
+  _audioGraphPromise: null,
+  _audioGraphToken: 0,
+  _volumeWarningKey: null,
   _spinnerTimer: null,
   _errorRetry: null,
   _hasPlayed: false,
@@ -841,19 +854,34 @@ const Player = {
     this.video = $('#video');
     const v = this.video;
     try { v.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
+    this.bindVideoEvents(v);
 
-    /* ---- core element events ---- */
+    /* ---- restore persisted settings ---- */
+    const s = Settings.data;
+    const savedVolume = Number(s.volume ?? 1);
+    this.volumeLevel = clamp(Number.isFinite(savedVolume) ? savedVolume : 1, 0, 2);
+    v.volume = Math.min(this.volumeLevel, 1);
+    v.muted = !!s.muted;
+    setPreservesPitch(v, s.preservePitch !== false);
+    this.setSpeed(s.speed || 1, { silent: true });
+
+    return this;
+  },
+
+  /** Attach media listeners to the active video (also used after a safe element swap). */
+  bindVideoEvents(video) {
+    const onActive = (fn) => (event) => { if (video === this.video) fn(event); };
     /* Play/pause is intentionally silent: no overlay icon, no text — the
        control-bar play button is the only state indicator. */
-    v.addEventListener('play', () => {
+    video.addEventListener('play', onActive(() => {
       document.body.classList.add('is-playing');
       this._hasPlayed = true;
       this._loading = false;
       StreamEngine.setPaused(false);
       this.updatePlayButton();
       MediaSession.update();
-    });
-    v.addEventListener('pause', () => {
+    }));
+    video.addEventListener('pause', onActive(() => {
       document.body.classList.remove('is-playing');
       this.updatePlayButton();
       this.hideSpinner();
@@ -861,33 +889,24 @@ const Player = {
       // Playback stopped, downloading does not: keep filling the buffer ahead.
       StreamEngine.setPaused(true);
       MediaSession.update();
-    });
-    v.addEventListener('ended', () => { this.onEnded(); MediaSession.update(); });
-    v.addEventListener('progress', throttle(() => Controls.renderProgress(), 250));
+    }));
+    video.addEventListener('ended', onActive(() => { this.onEnded(); MediaSession.update(); }));
+    video.addEventListener('progress', onActive(throttle(() => Controls.renderProgress(), 250)));
     // Keep the stored position reasonably fresh while playing (not only on pause),
     // so closing the tab or a crash still resumes in the right place.
-    v.addEventListener('timeupdate', throttle(() => this.rememberPosition(), 10000));
-    v.addEventListener('durationchange', () => { Controls.renderProgress(); Controls.renderDuration(); });
-    v.addEventListener('volumechange', () => Controls.renderVolume());
-    v.addEventListener('ratechange', () => Controls.renderSpeed());
-    v.addEventListener('seeking', () => { if (v.readyState < 3) this.showSpinner(); });
-    v.addEventListener('seeked', () => { this.hideSpinner(); this._resumePending = false; this.rememberPosition(); });
-    v.addEventListener('waiting', () => this.showSpinner());
-    v.addEventListener('stalled', () => this.showSpinner());
-    v.addEventListener('canplay', () => this.hideSpinner());
-    v.addEventListener('canplaythrough', () => this.hideSpinner());
-    v.addEventListener('playing', () => { this.hideSpinner(); this.setError(null); });
-    v.addEventListener('loadedmetadata', () => { Controls.renderDuration(); this.hideEmptyState(); });
-    v.addEventListener('error', () => this.onMediaError());
-
-    /* ---- restore persisted settings ---- */
-    const s = Settings.data;
-    v.volume = clamp(s.volume ?? 1, 0, 1);
-    v.muted = !!s.muted;
-    setPreservesPitch(v, s.preservePitch !== false);
-    this.setSpeed(s.speed || 1, { silent: true });
-
-    return this;
+    video.addEventListener('timeupdate', onActive(throttle(() => this.rememberPosition(), 10000)));
+    video.addEventListener('durationchange', onActive(() => { Controls.renderProgress(); Controls.renderDuration(); }));
+    video.addEventListener('volumechange', onActive(() => Controls.renderVolume()));
+    video.addEventListener('ratechange', onActive(() => Controls.renderSpeed()));
+    video.addEventListener('seeking', onActive(() => { if (video.readyState < 3) this.showSpinner(); }));
+    video.addEventListener('seeked', onActive(() => { this.hideSpinner(); this._resumePending = false; this.rememberPosition(); }));
+    video.addEventListener('waiting', onActive(() => this.showSpinner()));
+    video.addEventListener('stalled', onActive(() => this.showSpinner()));
+    video.addEventListener('canplay', onActive(() => this.hideSpinner()));
+    video.addEventListener('canplaythrough', onActive(() => this.hideSpinner()));
+    video.addEventListener('playing', onActive(() => { this.hideSpinner(); this.setError(null); }));
+    video.addEventListener('loadedmetadata', onActive(() => { Controls.renderDuration(); this.hideEmptyState(); }));
+    video.addEventListener('error', onActive(() => this.onMediaError()));
   },
 
   setSpeed(rate, { silent = false } = {}) {
@@ -900,15 +919,187 @@ const Player = {
     return r;
   },
 
+  /** Whether a video URL is safe to route through Web Audio without CORS muting it. */
+  sourceIsAudioSafe(source, video = this.video) {
+    if (video?.crossOrigin === 'anonymous' || video?.crossOrigin === 'use-credentials') return true;
+    if (!source) return false;
+    try {
+      const url = new URL(String(source), location.href);
+      // App-created object URLs (local files, offline blobs and CORS blob fallback) share this origin.
+      if (url.protocol === 'blob:') return url.origin === location.origin || (url.origin === 'null' && location.origin === 'null');
+      return url.origin === location.origin;
+    } catch { return false; }
+  },
+
+  currentAudioSource() {
+    return this.video?.currentSrc || this.video?.src || this.current?.objectUrl || this.current?.url || '';
+  },
+
+  canUseAudioGraph() {
+    if (this.audioSource && this.audioGraphVideo === this.video) return !!this.audioGain;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    return !!AudioContextClass && this.sourceIsAudioSafe(this.currentAudioSource());
+  },
+
+  hasMediaSource() {
+    return !!(this.current || this.video?.currentSrc || this.video?.src);
+  },
+
+  /** Keep the graph gain synchronized with the saved 0–200% volume. */
+  applyAudioGain() {
+    if (!this.audioGain || this.audioGraphVideo !== this.video) return false;
+    try {
+      const gain = this.audioGain.gain;
+      if (gain.setTargetAtTime && this.audioContext) gain.setTargetAtTime(this.volumeLevel, this.audioContext.currentTime, 0.015);
+      else gain.value = this.volumeLevel;
+      return true;
+    } catch { return false; }
+  },
+
+  /**
+   * Route safe sources through a GainNode. The regular media element remains
+   * untouched for no-CORS cross-origin streams (Web Audio would silence them).
+   */
+  ensureAudioGraph() {
+    const video = this.video;
+    if (this.audioSource && this.audioGraphVideo === video) {
+      if (!this.audioGain) return Promise.resolve(false);
+      video.volume = 1;
+      this.applyAudioGain();
+      return Promise.resolve(true);
+    }
+    if (this._audioGraphPromise) return this._audioGraphPromise;
+    if (!this.canUseAudioGraph()) return Promise.resolve(false);
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (typeof AudioContextClass !== 'function') return Promise.resolve(false);
+    let context = this.audioContext;
+    try {
+      if (!context || context.state === 'closed') context = this.audioContext = new AudioContextClass();
+    } catch (err) {
+      console.warn('[audio] unable to create AudioContext', err);
+      return Promise.resolve(false);
+    }
+
+    const token = ++this._audioGraphToken;
+    const pending = (async () => {
+      let gain;
+      let source;
+      try {
+        if (context.state !== 'running' && typeof context.resume === 'function') await context.resume();
+        if (video !== this.video || token !== this._audioGraphToken || !this.sourceIsAudioSafe(this.currentAudioSource())) return false;
+        if (typeof context.createGain !== 'function' || typeof context.createMediaElementSource !== 'function') return false;
+        // Connect the gain to output before routing the element, so a failed
+        // source connection cannot strand the video with no audible path.
+        gain = context.createGain();
+        gain.connect(context.destination);
+        source = context.createMediaElementSource(video);
+        source.connect(gain);
+        this.audioSource = source;
+        this.audioGain = gain;
+        this.audioGraphVideo = video;
+        video.volume = 1;
+        this.applyAudioGain();
+        return true;
+      } catch (err) {
+        if (source) {
+          // A created MediaElementSource cannot be detached from the element;
+          // connect it directly so a failed GainNode edge does not mute playback.
+          try { source.disconnect?.(); } catch { /* ignore cleanup errors */ }
+          try { source.connect(context.destination); } catch { /* no recoverable output path */ }
+          this.audioSource = source;
+          this.audioGain = null;
+          this.audioGraphVideo = video;
+        }
+        try { gain?.disconnect?.(); } catch { /* ignore cleanup errors */ }
+        console.warn('[audio] volume processing could not be enabled', err);
+        return false;
+      }
+    })();
+    this._audioGraphPromise = pending.finally(() => {
+      if (this._audioGraphPromise === wrapped) this._audioGraphPromise = null;
+    });
+    const wrapped = this._audioGraphPromise;
+    return wrapped;
+  },
+
+  volumeBoostUnavailableMessage() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    return typeof AudioContextClass !== 'function'
+      ? 'This browser cannot apply software audio gain, so volume is limited to 100%.'
+      : 'This source blocks browser volume boosting. It is limited to 100%; use a local or same-origin source for up to 200%.';
+  },
+
+  showVolumeBoostWarning(message = this.volumeBoostUnavailableMessage()) {
+    const key = this.current?.id || this.currentAudioSource() || 'empty';
+    if (this._volumeWarningKey === key) return;
+    this._volumeWarningKey = key;
+    Toast.warn(message);
+  },
+
+  /** Force a clear, truthful 100% fallback when gain processing is unavailable. */
+  limitVolumeToNative({ notify = true, message } = {}) {
+    this.volumeLevel = 1;
+    this.video.volume = 1;
+    Settings.set('volume', 1);
+    Settings.set('lastVolume', 1);
+    if (notify) this.showVolumeBoostWarning(message);
+    Controls.renderVolume();
+    return 1;
+  },
+
+  /** Apply this.volumeLevel without ever assigning a value above 1 to media.volume. */
+  writeVolumeOutput() {
+    const video = this.video;
+    if (this.audioSource && this.audioGraphVideo === video && this.audioGain) {
+      video.volume = 1;
+      this.applyAudioGain();
+    } else {
+      video.volume = Math.min(this.volumeLevel, 1);
+    }
+  },
+
+  /** Restore the saved volume when a new source is attached. */
+  syncVolumeForCurrentSource({ notify = true } = {}) {
+    if (this.volumeLevel > 1 && this.hasMediaSource() && !this.canUseAudioGraph()) {
+      return this.limitVolumeToNative({ notify, message: this.volumeBoostUnavailableMessage() });
+    }
+    this.writeVolumeOutput();
+    if (this.volumeLevel !== 1 && this.canUseAudioGraph()) {
+      const requested = this.volumeLevel;
+      const video = this.video;
+      this.ensureAudioGraph().then((ok) => {
+        if (!ok && video === this.video && requested > 1 && this.volumeLevel > 1) this.limitVolumeToNative({ notify });
+      });
+    }
+    Controls.renderVolume();
+    return this.volumeLevel;
+  },
+
   setVolume(value, { fromUser = true } = {}) {
-    const v = clamp(value, 0, 1);
-    this.video.volume = v;
-    if (v > 0 && this.video.muted) this.video.muted = false;
-    if (v > 0) Settings.set('lastVolume', v);
-    Settings.set('volume', v);
+    let level = clamp(Number(value) || 0, 0, 2);
+    if (level > 1 && this.hasMediaSource() && !this.canUseAudioGraph()) {
+      return this.limitVolumeToNative({ message: this.volumeBoostUnavailableMessage() });
+    }
+    this.volumeLevel = level;
+    if (level > 0 && this.video.muted) this.video.muted = false;
+    this.writeVolumeOutput();
+    if (level > 0) Settings.set('lastVolume', level);
+    Settings.set('volume', level);
     Settings.set('muted', this.video.muted);
+
+    if (level !== 1 && this.hasMediaSource() && this.canUseAudioGraph()) {
+      const requested = level;
+      const video = this.video;
+      this.ensureAudioGraph().then((ok) => {
+        if (!ok && video === this.video && requested > 1 && this.volumeLevel > 1) {
+          this.limitVolumeToNative({ notify: true, message: 'Audio boost could not start in this browser. Volume has been returned to 100%.' });
+        }
+      });
+    }
     Controls.renderVolume();
     if (fromUser) MediaSession.updateVolumeHint();
+    return this.volumeLevel;
   },
 
   setMuted(muted, { silent = false } = {}) {
@@ -920,17 +1111,62 @@ const Player = {
 
   toggleMute() { this.setMuted(!this.video.muted); },
 
-  /** +0.05 / −0.05 volume steps with a UI toast. */
+  /** +/- 5 percentage-point volume steps, up to the 200% app gain ceiling. */
   nudgeVolume(delta) {
-    const target = clamp((this.video.muted ? 0 : this.video.volume) + delta, 0, 1);
-    if (this.video.muted && delta > 0) this.video.muted = false;
+    const target = clamp((this.video.muted ? 0 : this.volumeLevel) + delta, 0, 2);
     this.setVolume(target);
     Toast.show(`Volume ${Math.round(target * 100)}%`, 'info', 1100, 'volume');
+  },
+
+  /** Replace an already-routed video before loading a no-CORS cross-origin source. */
+  replaceVideoForNativeAudio() {
+    const oldVideo = this.video;
+    if (!oldVideo?.parentNode) return;
+    const replacement = oldVideo.cloneNode(false);
+    replacement.removeAttribute('src');
+    replacement.removeAttribute('crossorigin');
+    replacement.innerHTML = '';
+    replacement.volume = Math.min(this.volumeLevel, 1);
+    replacement.muted = !!Settings.get('muted');
+    replacement.playbackRate = oldVideo.playbackRate || 1;
+    replacement.defaultPlaybackRate = oldVideo.defaultPlaybackRate || replacement.playbackRate;
+    setPreservesPitch(replacement, Settings.get('preservePitch') !== false);
+
+    // Invalidate an in-flight resume() before it can route the old element.
+    this._audioGraphToken++;
+    this._audioGraphPromise = null;
+    try { this.audioSource?.disconnect?.(); } catch { /* ignore */ }
+    try { this.audioGain?.disconnect?.(); } catch { /* ignore */ }
+    this.audioSource = null;
+    this.audioGain = null;
+    this.audioGraphVideo = null;
+
+    oldVideo.parentNode.replaceChild(replacement, oldVideo);
+    this.video = replacement;
+    document.body.classList.remove('is-playing');
+    try { oldVideo.pause(); oldVideo.removeAttribute('src'); oldVideo.innerHTML = ''; oldVideo.load(); } catch { /* detached source cleanup */ }
+    try { replacement.referrerPolicy = 'no-referrer'; } catch { /* ignore */ }
+    this.bindVideoEvents(replacement);
+    Controls.bindVideo(replacement);
+    Subtitles.bindVideo(replacement);
+    Controls.renderProgress();
+    Controls.renderDuration();
+    Controls.renderVolume();
+    Controls.renderSpeed();
   },
 
   togglePlay() { this.video.paused ? this.play() : this.pause(); },
 
   play() {
+    if (this.volumeLevel !== 1 && this.hasMediaSource() && this.canUseAudioGraph()) {
+      const requested = this.volumeLevel;
+      const video = this.video;
+      this.ensureAudioGraph().then((ok) => {
+        if (!ok && video === this.video && requested > 1 && this.volumeLevel > 1) {
+          this.limitVolumeToNative({ message: 'Audio boost could not start in this browser. Volume has been returned to 100%.' });
+        }
+      });
+    }
     const p = this.video.play();
     if (p && typeof p.catch === 'function') {
       p.catch((err) => {
@@ -1085,14 +1321,18 @@ const Player = {
     this._loadGen = (this._loadGen || 0) + 1;
     const loadGen = this._loadGen;
     this.current = item;
+    this._volumeWarningKey = null;
     this.showSpinner();
     Playlist.markCurrent(item.id);
     UI.renderCurrentTitle(item);
     MediaSession.setMetadata(item);
 
-    const v = this.video;
     const type = item.type || detectType(item.url, 'progressive');
     const src = item.objectUrl || item.url;
+    // A video already routed through Web Audio cannot safely play an opaque
+    // cross-origin resource. Swap to a fresh native element instead of muting it.
+    if (this.audioSource && !this.sourceIsAudioSafe(src, null)) this.replaceVideoForNativeAudio();
+    const v = this.video;
 
     // Ask the browser to fetch ahead for progressive, native HLS, and DASH sources.
     // MSE-based HLS/DASH also use their own forward-buffer targets below.
@@ -1175,6 +1415,7 @@ const Player = {
     // Subtitles: explicit tracks attached to the item + sidecar detection.
     Subtitles.attachItemTracks(item);
     Subtitles.detectSidecars(item).catch(() => { /* optional */ });
+    this.syncVolumeForCurrentSource();
 
     this._loading = false;
     if (autoplay) this.play();
@@ -1204,6 +1445,7 @@ const Player = {
             this.objectUrls.add(obj);
             item.objectUrl = obj;
             this.video.src = obj;
+            this.syncVolumeForCurrentSource();
             this.play();
             return;
           }
@@ -1311,18 +1553,13 @@ const Controls = {
 
     /* --- seek bar --- */
     const seek = $('#seek');
-    const scrubTo = (clientX) => {
-      const rect = seek.getBoundingClientRect();
-      const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
-      const dur = Number.isFinite(v.duration) ? v.duration : 0;
-      return ratio * dur;
-    };
     // Show a live tooltip while hovering / dragging.
     const tooltip = $('#seekTooltip');
     const moveTooltip = (clientX) => {
       const rect = seek.getBoundingClientRect();
       const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
-      tooltip.textContent = fmtTime(ratio * (Number.isFinite(v.duration) ? v.duration : 0));
+      const duration = Number.isFinite(Player.video.duration) ? Player.video.duration : 0;
+      tooltip.textContent = fmtTime(ratio * duration);
       tooltip.style.left = `${ratio * rect.width}px`;
       tooltip.hidden = false;
     };
@@ -1331,13 +1568,14 @@ const Controls = {
     seek.addEventListener('pointerdown', () => { this.seeking = true; tooltip.hidden = false; });
     seek.addEventListener('input', (e) => {
       // Live scrub feedback: show the target time while dragging.
-      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      const dur = Number.isFinite(Player.video.duration) ? Player.video.duration : 0;
       $('#timeCurrent').textContent = fmtTime((e.target.value / 1000) * dur);
       seek.style.setProperty('--progress', `${e.target.value / 10}%`);
       moveTooltip(e.clientX || seek.getBoundingClientRect().left);
     });
     const commitSeek = (e) => {
-      const target = (e.target.value / 1000) * (Number.isFinite(v.duration) ? v.duration : 0);
+      const duration = Number.isFinite(Player.video.duration) ? Player.video.duration : 0;
+      const target = (e.target.value / 1000) * duration;
       Player.seekTo(target);
       this.seeking = false;
       tooltip.hidden = true;
@@ -1350,10 +1588,7 @@ const Controls = {
 
     /* --- volume --- */
     const vol = $('#volume');
-    vol.addEventListener('input', () => {
-      Player.setVolume(parseFloat(vol.value));
-      vol.style.setProperty('--progress', `${vol.value * 100}%`);
-    });
+    vol.addEventListener('input', () => Player.setVolume(Number(vol.value) / 100));
     $('#btnMute').addEventListener('click', () => Player.toggleMute());
 
     /* --- shuffle / loop / speed / captions / pip / fullscreen --- */
@@ -1433,7 +1668,7 @@ const Controls = {
     }
 
     /* --- keep the seek bar in sync while playing --- */
-    v.addEventListener('timeupdate', () => { if (!this.seeking) this.renderProgress(); });
+    this.bindVideo(v);
 
     /* Keep labels in sync with physical phone rotation too. */
     window.screen.orientation?.addEventListener?.('change', () => this.renderOrientation());
@@ -1445,6 +1680,12 @@ const Controls = {
     this.renderLoop();
     this.renderShuffle();
     this.renderProgress();
+  },
+
+  bindVideo(video) {
+    video.addEventListener('timeupdate', () => {
+      if (video === Player.video && !this.seeking) this.renderProgress();
+    });
   },
 
   showBigPlay(show) { $('#bigPlay').hidden = !show; },
@@ -1483,12 +1724,16 @@ const Controls = {
   renderVolume() {
     const v = Player.video;
     const vol = $('#volume');
-    const effective = v.muted ? 0 : v.volume;
-    vol.value = String(effective);
-    vol.style.setProperty('--progress', `${effective * 100}%`);
-    $('#volumeOut').textContent = `${Math.round(effective * 100)}%`;
-    document.body.classList.toggle('is-muted', v.muted || v.volume === 0);
-    document.body.classList.toggle('is-vol-low', !v.muted && v.volume > 0 && v.volume <= 0.5);
+    const effective = v.muted ? 0 : Player.volumeLevel;
+    const percent = Math.round(effective * 100);
+    vol.value = String(percent);
+    vol.style.setProperty('--progress', `${clamp(effective / 2, 0, 1) * 100}%`);
+    vol.setAttribute('aria-valuetext', `${percent}%${percent > 100 ? ' (boost)' : ''}`);
+    vol.title = `Volume ${percent}% — up to 200%`;
+    $('#volumeOut').textContent = `${percent}%`;
+    document.body.classList.toggle('is-muted', v.muted || Player.volumeLevel === 0);
+    document.body.classList.toggle('is-vol-low', !v.muted && Player.volumeLevel > 0 && Player.volumeLevel <= 0.5);
+    document.body.classList.toggle('is-volume-boost', !v.muted && Player.volumeLevel > 1);
   },
 
   renderSpeed() {
@@ -1754,7 +1999,7 @@ const Gestures = {
         startX: this.touchStart.x,
         startY: this.touchStart.y,
         startTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
-        startVolume: video.muted ? 0 : video.volume,
+        startVolume: video.muted ? 0 : Player.volumeLevel,
       };
       // A swipe must never fall through to a single/double-tap action.
       clearTimeout(this.singleTapTimer);
@@ -1834,9 +2079,9 @@ const Gestures = {
     }
 
     const stageHeight = $('#playerStage').getBoundingClientRect().height || 240;
-    const target = clamp(gesture.startVolume - (clientY - gesture.startY) / Math.max(stageHeight, 180), 0, 1);
+    const target = clamp(gesture.startVolume - ((clientY - gesture.startY) / Math.max(stageHeight, 180)) * 2, 0, 2);
     Player.setVolume(target);
-    this.showGestureHud('volume', `${Math.round((Player.video.muted ? 0 : Player.video.volume) * 100)}%`);
+    this.showGestureHud('volume', `${Math.round((Player.video.muted ? 0 : Player.volumeLevel) * 100)}%`);
   },
 
   showGestureHud(kind, label, direction = 'right') {
@@ -2881,6 +3126,15 @@ const Subtitles = {
   embeddedMode: false,  // true while an in-band track is selected
   delay: 0,
   delayOriginals: new WeakMap(),
+  positionOriginals: new WeakMap(),
+  _boundVideos: new WeakSet(),
+  appearanceDefaults: {
+    subtitleSize: 100,
+    subtitleColor: '#ffffff',
+    subtitleBackgroundColor: '#000000',
+    subtitleBackgroundOpacity: 75,
+    subtitlePosition: 8,
+  },
   detectedFor: null,
 
   init() {
@@ -2894,12 +3148,130 @@ const Subtitles = {
       e.target.value = '';
     });
 
-    // Embedded / in-band tracks (HLS, MP4 with soft subs)
-    Player.video.textTracks.addEventListener?.('addtrack', () => this.render());
-    Player.video.addEventListener('loadedmetadata', () => this.enableAutoTracks());
+    $('#subtitleSize').addEventListener('input', (e) => this.setAppearance('subtitleSize', Number(e.target.value)));
+    $('#subtitleColor').addEventListener('input', (e) => this.setAppearance('subtitleColor', e.target.value));
+    $('#subtitleBackgroundColor').addEventListener('input', (e) => this.setAppearance('subtitleBackgroundColor', e.target.value));
+    $('#subtitleBackgroundOpacity').addEventListener('input', (e) => this.setAppearance('subtitleBackgroundOpacity', Number(e.target.value)));
+    $('#subtitlePosition').addEventListener('input', (e) => this.setAppearance('subtitlePosition', Number(e.target.value)));
+    $('#btnSubtitleResetAppearance').addEventListener('click', () => this.resetAppearance());
 
+    // Embedded / in-band tracks (HLS, MP4 with soft subs)
+    this.bindVideo(Player.video);
     this.setDelay(Settings.get('subtitleDelay') || 0, { silent: true });
+    this.renderAppearanceControls();
+    this.applyAppearance();
     $('#subtitleToggle').checked = Settings.get('captionsEnabled') !== false;
+  },
+
+  getAppearance() {
+    const number = (key, fallback, min, max) => {
+      const value = Number(Settings.get(key));
+      return clamp(Number.isFinite(value) ? value : fallback, min, max);
+    };
+    const color = (key, fallback) => {
+      const value = String(Settings.get(key) || '');
+      return /^#[\da-f]{6}$/i.test(value) ? value.toLowerCase() : fallback;
+    };
+    return {
+      size: number('subtitleSize', this.appearanceDefaults.subtitleSize, 50, 200),
+      color: color('subtitleColor', this.appearanceDefaults.subtitleColor),
+      backgroundColor: color('subtitleBackgroundColor', this.appearanceDefaults.subtitleBackgroundColor),
+      backgroundOpacity: number('subtitleBackgroundOpacity', this.appearanceDefaults.subtitleBackgroundOpacity, 0, 100),
+      position: number('subtitlePosition', this.appearanceDefaults.subtitlePosition, 0, 40),
+    };
+  },
+
+  renderAppearanceControls() {
+    const appearance = this.getAppearance();
+    $('#subtitleSize').value = String(appearance.size);
+    $('#subtitleSizeOut').textContent = `${Math.round(appearance.size)}%`;
+    $('#subtitleColor').value = appearance.color;
+    $('#subtitleBackgroundColor').value = appearance.backgroundColor;
+    $('#subtitleBackgroundOpacity').value = String(appearance.backgroundOpacity);
+    $('#subtitleBackgroundOpacityOut').textContent = `${Math.round(appearance.backgroundOpacity)}%`;
+    $('#subtitlePosition').value = String(appearance.position);
+    $('#subtitlePositionOut').textContent = `${Math.round(appearance.position)}%`;
+  },
+
+  setAppearance(key, value) {
+    const numeric = {
+      subtitleSize: [50, 200],
+      subtitleBackgroundOpacity: [0, 100],
+      subtitlePosition: [0, 40],
+    };
+    if (numeric[key]) {
+      const [min, max] = numeric[key];
+      const number = Number(value);
+      value = clamp(Number.isFinite(number) ? number : this.appearanceDefaults[key], min, max);
+    } else if (key === 'subtitleColor' || key === 'subtitleBackgroundColor') {
+      value = /^#[\da-f]{6}$/i.test(String(value)) ? String(value).toLowerCase() : this.appearanceDefaults[key];
+    } else return;
+    Settings.set(key, value);
+    this.renderAppearanceControls();
+    this.applyAppearance();
+  },
+
+  resetAppearance() {
+    Object.entries(this.appearanceDefaults).forEach(([key, value]) => Settings.set(key, value));
+    this.renderAppearanceControls();
+    this.applyAppearance();
+  },
+
+  applyAppearance() {
+    const appearance = this.getAppearance();
+    let style = document.getElementById('subtitleAppearanceStyle');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'subtitleAppearanceStyle';
+      document.head.append(style);
+    }
+    const hex = appearance.backgroundColor.slice(1);
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    const alpha = (appearance.backgroundOpacity / 100).toFixed(2);
+    style.textContent = `#video::cue { color: ${appearance.color}; background-color: rgba(${r}, ${g}, ${b}, ${alpha}); font-size: ${(appearance.size / 100).toFixed(2)}em; text-shadow: 0 1px 2px rgba(0, 0, 0, .85); }`;
+    this.applyCuePosition(appearance.position);
+  },
+
+  applyCuePosition(position = this.getAppearance().position) {
+    const video = Player.video;
+    if (!video?.textTracks) return;
+    const tracks = [];
+    this.tracks.forEach((item) => { if (item.element?.track) tracks.push(item.element.track); });
+    for (let i = 0; i < video.textTracks.length; i++) tracks.push(video.textTracks[i]);
+    const line = 100 - clamp(Number(position) || 0, 0, 40);
+    tracks.forEach((track) => {
+      let cues;
+      try { cues = track.cues; } catch { return; }
+      if (!cues) return;
+      for (let i = 0; i < cues.length; i++) {
+        const cue = cues[i];
+        if (!this.positionOriginals.has(cue)) {
+          this.positionOriginals.set(cue, { line: cue.line, snapToLines: cue.snapToLines, lineAlign: cue.lineAlign });
+        }
+        try {
+          cue.snapToLines = false;
+          cue.line = line;
+          if ('lineAlign' in cue) cue.lineAlign = 'end';
+        } catch { /* browser-owned cues may not expose writable positioning */ }
+      }
+    });
+  },
+
+  bindVideo(video) {
+    if (!video || this._boundVideos.has(video)) return;
+    this._boundVideos.add(video);
+    video.textTracks.addEventListener?.('addtrack', () => {
+      if (video !== Player.video) return;
+      this.render();
+      this.applyAppearance();
+    });
+    video.addEventListener('loadedmetadata', () => {
+      if (video !== Player.video) return;
+      this.enableAutoTracks();
+      this.applyAppearance();
+    });
   },
 
   /* ---------- sheet ---------- */
@@ -2996,6 +3368,7 @@ const Subtitles = {
     this.syncTrackElements();
     this.render();
     this.applyDelay();
+    this.applyAppearance();
   },
 
   /** Rebuild the <track> children of the video element from this.tracks. */
@@ -3011,7 +3384,7 @@ const Subtitles = {
         'data-managed': 'true',
         'data-id': t.id,
       });
-      track.addEventListener('load', () => this.applyDelay());
+      track.addEventListener('load', () => { this.applyDelay(); this.applyAppearance(); });
       v.append(track);
       t.element = track;
     });
@@ -3084,6 +3457,7 @@ const Subtitles = {
     const hasTracks = this.tracks.length > 0 || this.countEmbedded() > 0;
     document.body.classList.toggle('captions-on', !!enabled && hasTracks);
     $('#subtitleToggle').checked = !!enabled;
+    this.applyAppearance();
 
     if (!notify) return;
     if (hasTracks) Toast.show(enabled ? 'Subtitles on' : 'Subtitles off', 'info', 1100);
@@ -3146,6 +3520,7 @@ const Subtitles = {
         cue.endTime = Math.max(0.05, original.end + this.delay);
       }
     });
+    this.applyCuePosition();
   },
 
   /** Auto-select the first available track (respecting the saved preference). */

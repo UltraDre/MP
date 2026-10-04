@@ -77,6 +77,24 @@ window.matchMedia = (q) => ({
   media: q,
   addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
 });
+const audioTest = { gains: [], sources: [] };
+window.AudioContext = class FakeAudioContext {
+  constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {}; }
+  resume() { this.state = 'running'; return Promise.resolve(); }
+  createGain() {
+    const node = {
+      gain: { value: 1, setTargetAtTime(value) { this.value = value; } },
+      connect() {}, disconnect() {},
+    };
+    audioTest.gains.push(node);
+    return node;
+  }
+  createMediaElementSource(videoEl) {
+    const source = { video: videoEl, connect() {}, disconnect() {} };
+    audioTest.sources.push(source);
+    return source;
+  }
+};
 window.URL.createObjectURL = () => 'blob:https://example.com/' + Math.random().toString(36).slice(2);
 window.URL.revokeObjectURL = () => {};
 window.confirm = () => true;
@@ -152,10 +170,17 @@ $('#btnMute').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 
 // volume slider
 const vol = $('#volume');
-vol.value = '0.3';
+check('volume slider offers a 200% ceiling', vol.min === '0' && vol.max === '200', `${vol.min}–${vol.max}`);
+vol.value = '30';
 vol.dispatchEvent(new window.Event('input', { bubbles: true }));
-check('volume slider sets volume', Math.abs(video.volume - 0.3) < 0.001, String(video.volume));
+check('volume slider sets 30% output', Math.abs(video.volume - 0.3) < 0.001, String(video.volume));
 check('volume readout updated', $('#volumeOut').textContent === '30%', $('#volumeOut').textContent);
+vol.value = '150';
+vol.dispatchEvent(new window.Event('input', { bubbles: true }));
+check('volume control reports a 150% boost setting', $('#volumeOut').textContent === '150%' && vol.getAttribute('aria-valuetext').includes('boost'),
+  `${$('#volumeOut').textContent}; ${vol.getAttribute('aria-valuetext')}`);
+vol.value = '30';
+vol.dispatchEvent(new window.Event('input', { bubbles: true }));
 await wait(250);
 check('volume persisted in localStorage', JSON.parse(window.localStorage.getItem('nebula.settings.v1')).volume === 0.3);
 
@@ -284,8 +309,8 @@ swipe(200, 150, 150, 150);
 check('swipe left seeks backward continuously', Math.abs(video.currentTime - 65) < 0.01, String(video.currentTime));
 video.volume = 0.3;
 swipe(200, 150, 200, 90);
-check('swipe up raises volume', Math.abs(video.volume - 0.5) < 0.01, String(video.volume));
-check('volume swipe shows the new percentage', $('#gestureHudLabel').textContent === '50%', $('#gestureHudLabel').textContent);
+check('swipe up raises volume across the extended range', Math.abs(video.volume - 0.7) < 0.01, String(video.volume));
+check('volume swipe shows the new percentage', $('#gestureHudLabel').textContent === '70%', $('#gestureHudLabel').textContent);
 swipe(200, 90, 200, 150);
 check('swipe down lowers volume', Math.abs(video.volume - 0.3) < 0.01, String(video.volume));
 
@@ -352,6 +377,9 @@ check('remove deletes an item', document.querySelectorAll('#playlistList .item')
 check('playlist count badge updated', $('#playlistCount').textContent === '1', $('#playlistCount').textContent);
 
 console.log('\n— local files —');
+// Keep this smoke-test video un-routed until the explicit gain-node test at the end.
+vol.value = '100';
+vol.dispatchEvent(new window.Event('input', { bubbles: true }));
 const file = new window.File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], 'clip.mp4', { type: 'video/mp4' });
 const srt = new window.File(['1\n00:00:01,000 --> 00:00:03,000\nHello there\n\n2\n00:00:04,000 --> 00:00:06,000\nSecond line\n'], 'clip.srt', { type: 'text/plain' });
 Object.defineProperty(srt, 'text', { value: async () => '1\n00:00:01,000 --> 00:00:03,000\nHello there\n' });
@@ -384,6 +412,42 @@ $('#btnSubtitleDelayPlus').dispatchEvent(new window.MouseEvent('click', { bubble
 await wait(250);
 check('delay +0.5s stored', JSON.parse(window.localStorage.getItem('nebula.settings.v1')).subtitleDelay === 0.5);
 check('delay readout', $('#subtitleDelayOut').textContent === '+0.5s', $('#subtitleDelayOut').textContent);
+
+// Subtitle appearance controls update both WebVTT cue styling and cue position.
+const positionCue = { startTime: 1, endTime: 2, line: 'auto', snapToLines: true, lineAlign: 'center' };
+textTracks[0] = { kind: 'subtitles', cues: [positionCue], mode: 'showing' };
+textTracks.length = 1;
+$('#subtitleAppearance').open = true;
+$('#subtitleSize').value = '150';
+$('#subtitleSize').dispatchEvent(new window.Event('input', { bubbles: true }));
+$('#subtitleColor').value = '#00ff00';
+$('#subtitleColor').dispatchEvent(new window.Event('input', { bubbles: true }));
+$('#subtitleBackgroundColor').value = '#123456';
+$('#subtitleBackgroundColor').dispatchEvent(new window.Event('input', { bubbles: true }));
+$('#subtitleBackgroundOpacity').value = '40';
+$('#subtitleBackgroundOpacity').dispatchEvent(new window.Event('input', { bubbles: true }));
+$('#subtitlePosition').value = '20';
+$('#subtitlePosition').dispatchEvent(new window.Event('input', { bubbles: true }));
+await wait(250);
+const cueStyle = $('#subtitleAppearanceStyle').textContent;
+const subtitleSettings = JSON.parse(window.localStorage.getItem('nebula.settings.v1'));
+check('subtitle size, color and background settings persist', subtitleSettings.subtitleSize === 150
+  && subtitleSettings.subtitleColor === '#00ff00' && subtitleSettings.subtitleBackgroundColor === '#123456'
+  && subtitleSettings.subtitleBackgroundOpacity === 40,
+  JSON.stringify({ size: subtitleSettings.subtitleSize, color: subtitleSettings.subtitleColor,
+    background: subtitleSettings.subtitleBackgroundColor, opacity: subtitleSettings.subtitleBackgroundOpacity }));
+check('subtitle style rule reflects size, color and background opacity', cueStyle.includes('font-size: 1.50em')
+  && cueStyle.includes('color: #00ff00') && cueStyle.includes('rgba(18, 52, 86, 0.40)'), cueStyle);
+check('subtitle position moves the cue up from the bottom', positionCue.snapToLines === false
+  && positionCue.line === 80 && positionCue.lineAlign === 'end', JSON.stringify(positionCue));
+check('subtitle vertical position persists', subtitleSettings.subtitlePosition === 20, String(subtitleSettings.subtitlePosition));
+$('#btnSubtitleResetAppearance').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(250);
+check('subtitle appearance reset restores defaults', JSON.parse(window.localStorage.getItem('nebula.settings.v1')).subtitleSize === 100
+  && $('#subtitleColor').value === '#ffffff' && $('#subtitlePosition').value === '8');
+delete textTracks[0];
+textTracks.length = 0;
+
 $('#subtitleToggle').checked = false;
 $('#subtitleToggle').dispatchEvent(new window.Event('change', { bubbles: true }));
 await wait(250);
@@ -731,7 +795,8 @@ check('Escape closes the panel', !$('#sidebar').classList.contains('open'));
 console.log('\n— reload persistence —');
 const settingsRaw = window.localStorage.getItem('nebula.settings.v1');
 const playlistRaw = window.localStorage.getItem('nebula.playlist.v1');
-check('settings object contains all keys', ['theme', 'volume', 'speed', 'loopMode', 'shuffle', 'captionsEnabled'].every((k) => k in JSON.parse(settingsRaw)),
+check('settings object contains player and subtitle appearance keys', ['theme', 'volume', 'speed', 'loopMode', 'shuffle', 'captionsEnabled',
+  'subtitleSize', 'subtitleColor', 'subtitleBackgroundColor', 'subtitleBackgroundOpacity', 'subtitlePosition'].every((k) => k in JSON.parse(settingsRaw)),
   settingsRaw);
 
 console.log('\n— resume positions —');
@@ -962,6 +1027,27 @@ check('Queue all adds all episodes to the playlist',
 
 $('#btnAnimeSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('closing anime search dialog hides it', $('#animeSearchDialog').open === false);
+
+console.log('\n— software volume boost —');
+vol.value = '30';
+vol.dispatchEvent(new window.Event('input', { bubbles: true }));
+submitUrl('https://example.com/volume-boost-demo.mp4');
+await wait(60);
+check('same-origin playback routes through a gain node when app volume is below 100%', audioTest.sources.length > 0
+  && audioTest.sources.at(-1).video === $('#video') && Math.abs(audioTest.gains.at(-1).gain.value - 0.3) < 0.001,
+  `${audioTest.sources.length} source(s), gain=${audioTest.gains.at(-1)?.gain.value}`);
+vol.value = '175';
+vol.dispatchEvent(new window.Event('input', { bubbles: true }));
+await wait(0);
+check('gain node amplifies above 100% while media.volume stays within its native limit',
+  Math.abs(audioTest.gains.at(-1).gain.value - 1.75) < 0.001 && $('#video').volume === 1
+  && $('#volumeOut').textContent === '175%', `gain=${audioTest.gains.at(-1)?.gain.value}, media=${$('#video').volume}`);
+const routedVideo = $('#video');
+submitUrl('https://cdn.example.com/after-boost-demo.mp4');
+await wait(60);
+check('switching to a no-CORS source keeps native audio playback intact', $('#video') !== routedVideo
+  && $('#volumeOut').textContent === '100%' && $('#video').volume === 1,
+  `video swapped=${$('#video') !== routedVideo}, output=${$('#volumeOut').textContent}`);
 
 console.log('\n— errors —');
 const realErrors = logs.errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom|Could not load script|resource/i.test(e));
