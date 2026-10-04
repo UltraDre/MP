@@ -223,6 +223,7 @@ const Settings = {
     seekZones: false,       // double-tap left/right third = ±10s (opt-in)
     prebufferWhilePaused: true, // keep downloading ahead while playback is paused
     movieSearchSource: 'all',   // movie search catalogue: 'all' | provider id
+    animeSearchSource: 'all',   // anime search catalogue: 'all' | provider id
     lastVolume: 1,
     subSearchLang: '',      // preferred language for the online subtitle search
     subSearchProxy: true,   // retry blocked (CORS) subtitle requests through a proxy
@@ -1373,6 +1374,7 @@ const Controls = {
     /* --- empty state quick actions --- */
     $('#btnEmptyLocal').addEventListener('click', (e) => { e.stopPropagation(); $('#fileInput').click(); });
     $('#btnEmptySearch').addEventListener('click', (e) => { e.stopPropagation(); MovieSearch.open(); });
+    $('#btnEmptyAnime')?.addEventListener('click', (e) => { e.stopPropagation(); AnimeSearch.open(); });
 
     /* --- "continue where you left off" (the title the app was closed with) --- */
     $('#btnResumePlay').addEventListener('click', (e) => {
@@ -2002,6 +2004,9 @@ const Keyboard = {
         else Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode');
         break;
       case 't': case 'T': e.preventDefault(); Theme.toggle(); break;
+      case 'a': case 'A':
+        if (e.shiftKey) { e.preventDefault(); AnimeSearch.open(); }
+        break;
       case 'd': case 'D': e.preventDefault(); Offline.downloadCurrent(); break;
       case 'n': e.preventDefault(); Playlist.advance(1); break;
       case 'N': e.preventDefault(); Playlist.advance(-1); break;
@@ -4092,6 +4097,7 @@ const Sources = {
     });
     $('#btnQueueUrl').addEventListener('click', (e) => { e.preventDefault(); this.loadFromInput({ play: false }); });
     $('#btnSearchMovies').addEventListener('click', () => MovieSearch.open({ query: MovieSearch.queryFromUrlInput() }));
+    $('#btnSearchAnime')?.addEventListener('click', () => AnimeSearch.open({ query: AnimeSearch.queryFromUrlInput() }));
 
     /* Local files */
     $('#btnAddLocal').addEventListener('click', () => $('#fileInput').click());
@@ -4918,6 +4924,793 @@ const MovieSearch = {
   },
 };
 
+/* =====================================================================
+ * ANIME SEARCH & STREAMING
+ * Direct video links, episodes and streams across Internet Archive,
+ * Kitsu Anime DB, Wikimedia Commons and PeerTube fediverse.
+ * ===================================================================*/
+
+/* ---- Internet Archive: anime series, episodes and movies with direct video files ---- */
+
+const ArchiveAnime = {
+  id: 'archive-anime',
+  label: 'Internet Archive (Anime Series & Movies)',
+  SEARCH_URL: 'https://archive.org/advancedsearch.php',
+  METADATA_URL: 'https://archive.org/metadata/',
+  MAX_LOOKUPS: 20,
+  MAX_RESULTS: 12,
+  LOOKUP_CONCURRENCY: 4,
+
+  quotePhrase(value) {
+    return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  },
+
+  searchUrl(query) {
+    const cleanQ = String(query).trim();
+    const quoted = this.quotePhrase(cleanQ);
+    const params = new URLSearchParams();
+    params.set('q', `(title:(${quoted}) OR title:(${cleanQ})) AND mediatype:movies`);
+    ['identifier', 'title', 'year', 'creator', 'description', 'mediatype', 'downloads'].forEach((field) => params.append('fl[]', field));
+    params.set('rows', String(this.MAX_LOOKUPS));
+    params.set('page', '1');
+    params.set('sort[]', 'downloads desc');
+    params.set('output', 'json');
+    return `${this.SEARCH_URL}?${params.toString()}`;
+  },
+
+  fallbackSearchUrl(query) {
+    const cleanQ = String(query).trim();
+    const params = new URLSearchParams();
+    params.set('q', `(${cleanQ}) AND mediatype:movies AND (anime OR animation OR subject:anime OR collection:anime)`);
+    ['identifier', 'title', 'year', 'creator', 'description', 'mediatype', 'downloads'].forEach((field) => params.append('fl[]', field));
+    params.set('rows', String(this.MAX_LOOKUPS));
+    params.set('page', '1');
+    params.set('sort[]', 'downloads desc');
+    params.set('output', 'json');
+    return `${this.SEARCH_URL}?${params.toString()}`;
+  },
+
+  directFileUrl(identifier, fileName) {
+    const path = fileName.split('/').map((part) => encodeURIComponent(part)).join('/');
+    return `https://archive.org/download/${encodeURIComponent(identifier)}/${path}`;
+  },
+
+  videoFiles(files, identifier) {
+    const accepted = new Set(['mp4', 'm4v', 'mov', 'webm', 'ogv', 'ogg', 'mkv']);
+    const priority = { mp4: 0, m4v: 1, webm: 2, mov: 3, ogv: 4, ogg: 5, mkv: 6 };
+    const list = (Array.isArray(files) ? files : Object.values(files || {}))
+      .filter((file) => file && typeof file.name === 'string' && file.source !== 'metadata')
+      .map((file) => {
+        const name = file.name.trim();
+        const ext = name.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || '';
+        return { ...file, name, ext };
+      })
+      .filter((file) => accepted.has(file.ext)
+        && !file.name.startsWith('/')
+        && !file.name.split('/').some((part) => !part || part === '.' || part === '..'));
+
+    const groups = new Map();
+    for (const file of list) {
+      const baseName = file.name.replace(/\.[a-z0-9]+$/i, '');
+      const cleanBase = baseName.replace(/[\s._-]+(h\.?264|720p|1080p|480p|360p|x264|x265|hevc|bd\w*|dvd\w*)$/i, '').trim() || baseName;
+      if (!groups.has(cleanBase)) {
+        groups.set(cleanBase, []);
+      }
+      groups.get(cleanBase).push(file);
+    }
+
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    const episodes = [];
+    for (const [groupName, groupFiles] of groups) {
+      groupFiles.sort((a, b) => (priority[a.ext] ?? 9) - (priority[b.ext] ?? 9));
+      const chosen = groupFiles[0];
+      const url = this.directFileUrl(identifier, chosen.name);
+      episodes.push({
+        title: groupName,
+        fileName: chosen.name,
+        fileSize: Number(chosen.size) || 0,
+        duration: Number(chosen.length) || Number(chosen.duration) || 0,
+        ext: chosen.ext,
+        url,
+        type: detectType(url, 'progressive'),
+      });
+    }
+
+    episodes.sort((a, b) => collator.compare(a.title, b.title));
+    return episodes;
+  },
+
+  async resolveHit(hit, signal) {
+    const identifier = String(hit?.identifier || '').trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,199}$/i.test(identifier)) return null;
+    const record = await MovieNet.fetchJson(`${this.METADATA_URL}${encodeURIComponent(identifier)}`, signal);
+    const metadata = record?.metadata || {};
+    if (metadata.mediatype && String(metadata.mediatype).toLowerCase() !== 'movies') return null;
+
+    const files = record?.files || [];
+    const episodes = this.videoFiles(files, identifier);
+    if (!episodes.length) return null;
+
+    const title = String(metadata.title || hit.title || identifier).trim().slice(0, 180) || identifier;
+    const year = String(metadata.year || hit.year || '').match(/\b\d{4}\b/)?.[0] || '';
+    const creatorValue = metadata.creator || hit.creator || '';
+    const creator = (Array.isArray(creatorValue) ? creatorValue.join(', ') : String(creatorValue))
+      .replace(/\s+/g, ' ').trim().slice(0, 100);
+    const description = MovieNet.cleanText(metadata.description || hit.description || '', 240);
+
+    const fileList = Array.isArray(files) ? files : Object.values(files || {});
+    const thumbFile = fileList.find((f) => f && typeof f.name === 'string' && (f.name === '__ia_thumb.jpg' || f.format === 'Thumbnail' || f.format === 'Item Tile' || /\.(jpe?g|png)$/i.test(f.name)));
+    const posterUrl = thumbFile ? this.directFileUrl(identifier, thumbFile.name) : `https://archive.org/services/img/${encodeURIComponent(identifier)}`;
+
+    const primaryEpisode = episodes[0];
+    return {
+      source: this.id,
+      sourceLabel: this.label,
+      title,
+      year,
+      creator,
+      description,
+      posterUrl,
+      identifier,
+      isSeries: episodes.length > 1,
+      episodes,
+      episodeCount: episodes.length,
+      fileName: primaryEpisode.fileName,
+      fileSize: primaryEpisode.fileSize,
+      duration: primaryEpisode.duration,
+      url: primaryEpisode.url,
+      type: primaryEpisode.type,
+      detailsUrl: `https://archive.org/details/${encodeURIComponent(identifier)}`,
+    };
+  },
+
+  async search(query, { signal } = {}) {
+    let data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    let hits = data?.response?.docs;
+    if (!Array.isArray(hits) || hits.length < 2) {
+      try {
+        const fallbackData = await MovieNet.fetchJson(this.fallbackSearchUrl(query), signal);
+        const fallbackHits = fallbackData?.response?.docs;
+        if (Array.isArray(fallbackHits)) {
+          hits = [...(hits || []), ...fallbackHits];
+        }
+      } catch { /* ignore fallback errors */ }
+    }
+    if (!Array.isArray(hits)) return [];
+    const unique = [];
+    const seen = new Set();
+    for (const hit of hits.slice(0, this.MAX_LOOKUPS)) {
+      const id = String(hit?.identifier || '');
+      if (id && !seen.has(id)) { seen.add(id); unique.push(hit); }
+    }
+    const resolved = await MovieNet.mapLimit(unique, this.LOOKUP_CONCURRENCY, (hit) => this.resolveHit(hit, signal));
+    return resolved.filter(Boolean).slice(0, this.MAX_RESULTS);
+  },
+};
+
+/* ---- Kitsu: anime catalogue metadata, episode counts & discovery ---- */
+
+const KitsuAnime = {
+  id: 'kitsu-anime',
+  label: 'Kitsu Anime DB (Info & Discovery)',
+  API_URL: 'https://kitsu.io/api/edge/anime',
+  MAX_RESULTS: 8,
+
+  searchUrl(query) {
+    const params = new URLSearchParams({
+      'filter[text]': String(query).trim(),
+      'page[limit]': String(this.MAX_RESULTS),
+    });
+    return `${this.API_URL}?${params.toString()}`;
+  },
+
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const items = Array.isArray(data?.data) ? data.data : [];
+    return items.map((item) => {
+      const attr = item?.attributes || {};
+      const titles = attr.titles || {};
+      const title = MovieNet.cleanText(titles.en || attr.canonicalTitle || titles.en_jp || titles.ja_jp || 'Unknown Anime', 180);
+      const japaneseTitle = MovieNet.cleanText(titles.ja_jp || '', 100);
+      const year = String(attr.startDate || '').match(/\b\d{4}\b/)?.[0] || '';
+      const episodeCount = Number(attr.episodeCount) || 0;
+      const rating = attr.averageRating ? `${Math.round(Number(attr.averageRating))}% score` : '';
+      const description = MovieNet.cleanText(attr.synopsis || attr.description || '', 240);
+      const posterUrl = attr.posterImage?.small || attr.posterImage?.medium || '';
+      const youtubeVideoId = attr.youtubeVideoId || '';
+      const detailsUrl = `https://kitsu.io/anime/${item.id}`;
+      return {
+        source: this.id,
+        sourceLabel: this.label,
+        title,
+        japaneseTitle,
+        year,
+        creator: japaneseTitle,
+        description,
+        posterUrl,
+        episodeCount,
+        rating,
+        youtubeVideoId,
+        detailsUrl,
+        isKitsuInfo: true,
+      };
+    });
+  },
+};
+
+/* ---- Wikimedia Commons: open-licensed anime & classic Japanese animations ---- */
+
+const CommonsAnime = {
+  id: 'commons-anime',
+  label: 'Wikimedia Commons (Classics & Open)',
+  API: 'https://commons.wikimedia.org/w/api.php',
+  MAX_LOOKUPS: 16,
+  MAX_RESULTS: 8,
+
+  searchUrl(query) {
+    const params = new URLSearchParams({
+      action: 'query',
+      format: 'json',
+      origin: '*',
+      generator: 'search',
+      gsrsearch: `${query} (anime OR animation OR manga OR japanese) filetype:video`,
+      gsrnamespace: '6',
+      gsrlimit: String(this.MAX_LOOKUPS),
+      prop: 'imageinfo',
+      iiprop: 'url|size|mime|user|extmetadata',
+      iiextmetadatafilter: 'LicenseShortName|LicenseUrl|Artist|DateTimeOriginal',
+    });
+    return `${this.API}?${params.toString()}`;
+  },
+
+  licenseInfo(info = {}) {
+    const ext = info.extmetadata || {};
+    const short = MovieNet.cleanText(ext.LicenseShortName?.value || '', 60);
+    const url = MovieNet.cleanText(ext.LicenseUrl?.value || '', 200);
+    return {
+      url: url || 'https://commons.wikimedia.org/wiki/Commons:Licensing',
+      label: `${short || 'Open license'} · uploader-declared`,
+    };
+  },
+
+  directUrl(raw) {
+    try {
+      const url = new URL(String(raw));
+      if (!/^https?:$/.test(url.protocol)) return '';
+      [...url.searchParams.keys()].forEach((key) => { if (/^utm_/i.test(key)) url.searchParams.delete(key); });
+      return url.href;
+    } catch { return ''; }
+  },
+
+  playable(info) {
+    const mime = String(info.mime || '').toLowerCase();
+    if (mime.startsWith('video/')) return true;
+    const path = String(info.url || '').split('?')[0].toLowerCase();
+    return mime === 'application/ogg' && /\.(ogv|ogg|oga|webm)$/.test(path);
+  },
+
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const pages = data?.query?.pages ? Object.values(data.query.pages) : [];
+    const results = [];
+    for (const page of pages) {
+      if (signal?.aborted) break;
+      const info = Array.isArray(page.imageinfo) ? page.imageinfo[0] : null;
+      if (!info || !this.playable(info)) continue;
+      const url = this.directUrl(info.url);
+      if (!url) continue;
+      const license = this.licenseInfo(info);
+      const fileName = MovieNet.cleanText(String(page.title || '').replace(/^File:/, ''), 200);
+      const title = MovieNet.cleanText(fileName.replace(/\.[a-z0-9]+$/i, '').replace(/_/g, ' '), 180) || fileName;
+      const stamp = MovieNet.cleanText(info.extmetadata?.DateTimeOriginal?.value || '', 40);
+      results.push({
+        source: this.id,
+        sourceLabel: this.label,
+        title,
+        year: stamp.match(/\b(1[89]\d\d|20\d\d)\b/)?.[0] || '',
+        creator: MovieNet.cleanText(info.extmetadata?.Artist?.value || info.user || '', 100),
+        license,
+        fileName,
+        fileSize: Number(info.size) || 0,
+        duration: Number(info.duration) || 0,
+        url,
+        type: detectType(url, 'progressive'),
+        detailsUrl: info.descriptionurl || `https://commons.wikimedia.org/wiki/${encodeURIComponent(String(page.title || ''))}`,
+      });
+      if (results.length >= this.MAX_RESULTS) break;
+    }
+    return results;
+  },
+};
+
+/* ---- PeerTube: federated anime video streams ---- */
+
+const PeerTubeAnime = {
+  id: 'peertube-anime',
+  label: 'PeerTube (Federated Streams)',
+  INDEX_URL: 'https://sepiasearch.org/api/v1/search/videos',
+  MAX_LOOKUPS: 10,
+  MAX_RESULTS: 6,
+  LOOKUP_CONCURRENCY: 4,
+
+  searchUrl(query) {
+    const params = new URLSearchParams({
+      search: `${query} anime`,
+      count: String(this.MAX_LOOKUPS),
+      sort: '-match',
+      isLive: 'false',
+      nsfw: 'false',
+    });
+    return `${this.INDEX_URL}?${params.toString()}`;
+  },
+
+  hostOf(hit) {
+    try {
+      const host = new URL(String(hit?.url || '')).host;
+      return /^[a-z0-9.-]+(?::\d+)?$/i.test(host) ? host : '';
+    } catch { return ''; }
+  },
+
+  detailUrl(host, uuid) {
+    return `https://${host}/api/v1/videos/${encodeURIComponent(uuid)}`;
+  },
+
+  bestFile(files) {
+    if (!Array.isArray(files)) return null;
+    return files
+      .filter((file) => file && typeof file.fileUrl === 'string' && /^https?:\/\//i.test(file.fileUrl) && file.hasVideo !== false)
+      .sort((a, b) => (Number(b.resolution?.id) || Number(b.height) || 0) - (Number(a.resolution?.id) || Number(a.height) || 0))[0] || null;
+  },
+
+  async resolve(hit, signal) {
+    const host = this.hostOf(hit);
+    const uuid = String(hit?.uuid || '');
+    if (!host || !uuid || signal?.aborted) return null;
+    const detail = await MovieNet.fetchJson(this.detailUrl(host, uuid), signal);
+    if (!detail || String(detail.privacy?.id) !== '1') return null;
+
+    const file = this.bestFile(detail.files);
+    const playlist = Array.isArray(detail.streamingPlaylists) ? detail.streamingPlaylists[0] : null;
+    const playlistUrl = playlist && typeof playlist.playlistUrl === 'string' && /^https?:\/\//i.test(playlist.playlistUrl)
+      ? playlist.playlistUrl : '';
+    const url = file ? file.fileUrl : playlistUrl;
+    if (!url) return null;
+
+    const published = String(detail.publishedAt || hit.publishedAt || '');
+    const posterUrl = detail.thumbnailPath ? `https://${host}${detail.thumbnailPath}` : (hit.thumbnailUrl || '');
+    return {
+      source: this.id,
+      sourceLabel: `${this.label} · ${host}`,
+      title: MovieNet.cleanText(detail.name || hit.name, 180),
+      year: published.match(/\b(1[89]\d\d|20\d\d)\b/)?.[0] || '',
+      creator: MovieNet.cleanText(detail.channel?.displayName || detail.account?.displayName || '', 100),
+      posterUrl,
+      fileName: file ? (String(file.fileUrl).split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1] || 'mp4') : 'm3u8',
+      fileSize: Number(file?.size) || 0,
+      duration: Number(detail.duration) || Number(hit.duration) || 0,
+      url,
+      type: detectType(url, 'progressive'),
+      detailsUrl: detail.url || hit.url || `https://${host}/videos/watch/${uuid}`,
+    };
+  },
+
+  async search(query, { signal } = {}) {
+    const data = await MovieNet.fetchJson(this.searchUrl(query), signal);
+    const hits = (Array.isArray(data?.data) ? data.data : [])
+      .filter((hit) => hit && hit.uuid && !hit.isLive
+        && (hit.privacy?.id === undefined || String(hit.privacy.id) === '1'))
+      .slice(0, this.MAX_LOOKUPS);
+    const resolved = await MovieNet.mapLimit(hits, this.LOOKUP_CONCURRENCY, (hit) => this.resolve(hit, signal));
+    const results = [];
+    const seenTitles = new Set();
+    for (const item of resolved) {
+      if (!item) continue;
+      const dedupe = item.title.toLowerCase();
+      if (seenTitles.has(dedupe)) continue;
+      seenTitles.add(dedupe);
+      results.push(item);
+      if (results.length >= this.MAX_RESULTS) break;
+    }
+    return results;
+  },
+};
+
+const AnimeSearch = {
+  sources: [ArchiveAnime, KitsuAnime, CommonsAnime, PeerTubeAnime],
+  searchToken: 0,
+  controller: null,
+  timeoutId: null,
+  lastQuery: '',
+
+  init() {
+    $('#animeSearchForm')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.search();
+    });
+    $('#btnAnimeSearchClose')?.addEventListener('click', () => this.close());
+    $('#btnAnimeSearchCancel')?.addEventListener('click', () => this.close());
+    $('#animeSearchDialog')?.addEventListener('close', () => this.cancelPending());
+
+    const select = $('#animeSearchSource');
+    if (select) {
+      select.replaceChildren(
+        el('option', { value: 'all', text: 'All anime catalogues' }),
+        ...this.sources.map((source) => el('option', { value: source.id, text: source.label })),
+      );
+      const saved = String(Settings.get('animeSearchSource') || 'all');
+      select.value = this.sources.some((source) => source.id === saved) ? saved : 'all';
+      select.addEventListener('change', () => {
+        Settings.set('animeSearchSource', select.value);
+        if (this.lastQuery && $('#animeSearchResults')?.childElementCount) this.search();
+      });
+    }
+  },
+
+  queryFromUrlInput() {
+    const raw = String($('#urlInput')?.value || '').trim();
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw) || /^(?:www\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}(?::\d+)?(?:\/|$)/i.test(raw)) return '';
+    return raw;
+  },
+
+  selectedSources() {
+    const select = $('#animeSearchSource');
+    const picked = select ? this.sources.find((source) => source.id === select.value) : null;
+    return picked ? [picked] : this.sources;
+  },
+
+  open({ query } = {}) {
+    const field = $('#animeSearchQuery');
+    if (!field) return;
+    const initial = String(query ?? this.queryFromUrlInput() ?? '').trim() || this.lastQuery;
+    field.value = initial.slice(0, 120);
+    $('#animeSearchResults')?.replaceChildren();
+    this.setStatus('Enter an anime title to search series, episodes, and direct streams.');
+    Shell.openDialog('#animeSearchDialog');
+    setTimeout(() => field.focus?.(), 60);
+  },
+
+  close() {
+    const dialog = $('#animeSearchDialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    else {
+      dialog.removeAttribute('open');
+      this.cancelPending();
+    }
+  },
+
+  cancelPending() {
+    if (this.timeoutId) { clearTimeout(this.timeoutId); this.timeoutId = null; }
+    if (this.controller) {
+      try { this.controller.abort(); } catch { /* noop */ }
+      this.controller = null;
+    }
+    const button = $('#btnAnimeSearchGo');
+    if (button) button.disabled = false;
+  },
+
+  setStatus(text, kind = '') {
+    const status = $('#animeSearchStatus');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('is-busy', kind === 'busy');
+    status.classList.toggle('is-warn', kind === 'warn');
+  },
+
+  async search() {
+    const field = $('#animeSearchQuery');
+    if (!field) return;
+    const query = String(field.value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (!query) {
+      this.setStatus('Enter an anime title to search.', 'warn');
+      field.focus();
+      return;
+    }
+
+    this.cancelPending();
+    const controller = new AbortController();
+    this.controller = controller;
+    const token = ++this.searchToken;
+    this.lastQuery = query;
+    field.value = query;
+    const sources = this.selectedSources();
+    $('#animeSearchResults')?.replaceChildren();
+    const goBtn = $('#btnAnimeSearchGo');
+    if (goBtn) goBtn.disabled = true;
+    this.setStatus(sources.length === 1
+      ? `Searching ${sources[0].label} for “${query}”…`
+      : `Searching ${sources.length} anime catalogues for “${query}”…`, 'busy');
+    this.timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    const tasks = sources.map((source) => source.search(query, { signal: controller.signal })
+      .then((items) => ({ source, items: Array.isArray(items) ? items : [] }))
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          console.warn(`[anime-search] ${source.label} failed`, err);
+        }
+        return { source, items: [], error: err };
+      }));
+
+    const results = await Promise.allSettled(tasks);
+    if (token !== this.searchToken) return;
+
+    this.controller = null;
+    if (this.timeoutId) { clearTimeout(this.timeoutId); this.timeoutId = null; }
+    if (goBtn) goBtn.disabled = false;
+
+    const combined = [];
+    const failures = [];
+    for (const res of results) {
+      if (res.status === 'fulfilled') {
+        combined.push(...res.value.items);
+        if (res.value.error) failures.push(res.value.source.label);
+      }
+    }
+
+    const unique = [];
+    const seen = new Set();
+    for (const item of combined) {
+      const key = `${(item.title || '').toLowerCase()}|${item.url || item.detailsUrl || ''}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(item);
+      }
+    }
+
+    this.renderResults(unique);
+
+    if (unique.length > 0) {
+      const count = unique.length;
+      const seriesCount = unique.filter((it) => it.isSeries).length;
+      const tail = failures.length ? ` (${failures.join(', ')} unavailable)` : '';
+      const seriesNote = seriesCount > 0 ? ` (${seriesCount} series with episodes)` : '';
+      this.setStatus(`Found ${count} result${count > 1 ? 's' : ''}${seriesNote} for “${query}”${tail}.`);
+    } else if (failures.length === sources.length) {
+      this.setStatus('All anime catalogues are currently unreachable. Please check your network or try again.', 'warn');
+    } else {
+      this.setStatus(`No anime found for “${query}”. Try another spelling, or enter a direct stream link.`, 'warn');
+    }
+  },
+
+  renderResults(items) {
+    const list = $('#animeSearchResults');
+    if (!list) return;
+    list.replaceChildren();
+    if (!items.length) return;
+
+    items.forEach((item) => {
+      const li = el('li', { class: item.posterUrl ? 'anime-result has-poster' : 'anime-result' });
+
+      if (item.posterUrl) {
+        const img = el('img', {
+          class: 'anime-result-poster',
+          src: item.posterUrl,
+          alt: item.title,
+          loading: 'lazy',
+        });
+        img.onerror = () => { img.style.display = 'none'; };
+        li.append(img);
+      }
+
+      const main = el('div', { class: 'anime-result-main' });
+      const titleLink = el('a', {
+        class: 'anime-result-title anime-result-link',
+        href: item.detailsUrl || '#',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        text: item.title,
+      });
+      main.append(titleLink);
+
+      const meta = el('div', { class: 'anime-result-meta' });
+      if (item.sourceLabel) meta.append(el('span', { class: 'tag source', text: item.sourceLabel }));
+      if (item.year) meta.append(el('span', { class: 'tag', text: item.year }));
+      if (item.isSeries && item.episodeCount) {
+        meta.append(el('span', { class: 'tag episodes', text: `${item.episodeCount} episode${item.episodeCount > 1 ? 's' : ''}` }));
+      }
+      if (item.rating) meta.append(el('span', { class: 'tag rating', text: item.rating }));
+      if (item.creator && !item.isKitsuInfo) meta.append(el('span', { text: `by ${item.creator}` }));
+
+      if (!item.isSeries && item.fileName) {
+        const ext = String(item.fileName || '').split('.').pop().toUpperCase();
+        const mediaText = [
+          ext ? `${ext} direct file` : 'Direct file',
+          item.duration ? fmtTime(item.duration) : '',
+          item.fileSize ? fmtBytes(item.fileSize) : '',
+        ].filter(Boolean).join(' · ');
+        meta.append(el('span', { class: 'tag', text: mediaText }));
+      }
+
+      if (item.license) {
+        meta.append(el('a', {
+          class: 'tag license', href: item.license.url, target: '_blank',
+          rel: 'noopener noreferrer', text: item.license.label,
+        }));
+      }
+
+      if (item.url) {
+        meta.append(el('a', {
+          class: 'anime-result-link', href: item.url, target: '_blank',
+          rel: 'noopener noreferrer', text: 'Open direct video',
+        }));
+      }
+
+      if (item.detailsUrl) {
+        meta.append(el('a', {
+          class: 'anime-result-link', href: item.detailsUrl, target: '_blank',
+          rel: 'noopener noreferrer', text: item.isKitsuInfo ? 'View on Kitsu' : 'View record',
+        }));
+      }
+      main.append(meta);
+
+      if (item.description) {
+        main.append(el('p', { class: 'anime-result-desc', text: item.description }));
+      }
+
+      const actions = el('div', { class: 'anime-result-actions' });
+
+      if (item.isSeries && item.episodes?.length) {
+        const playFirst = el('button', {
+          class: 'btn btn-primary', type: 'button',
+          'aria-label': `Play Episode 1 of ${item.title}`,
+        }, icon('i-play'), 'Play Ep 1');
+        playFirst.addEventListener('click', () => this.playEpisode(item, item.episodes[0]));
+
+        const queueFirst = el('button', {
+          class: 'btn', type: 'button',
+          'aria-label': `Queue Episode 1 of ${item.title}`,
+        }, icon('i-plus'), 'Queue Ep 1');
+        queueFirst.addEventListener('click', () => this.queueEpisode(item, item.episodes[0]));
+
+        const queueAll = el('button', {
+          class: 'btn', type: 'button',
+          'aria-label': `Queue all ${item.episodeCount} episodes of ${item.title}`,
+        }, icon('i-list'), `Queue all (${item.episodeCount})`);
+        queueAll.addEventListener('click', () => this.queueAllEpisodes(item));
+
+        actions.append(playFirst, queueFirst, queueAll);
+      } else if (item.url) {
+        const play = el('button', {
+          class: 'btn btn-primary', type: 'button',
+          'aria-label': `Play ${item.title}`,
+        }, icon('i-play'), 'Play');
+        play.addEventListener('click', () => this.playAnime(item));
+
+        const queue = el('button', {
+          class: 'btn', type: 'button',
+          'aria-label': `Queue ${item.title}`,
+        }, icon('i-plus'), 'Queue');
+        queue.addEventListener('click', () => this.queueAnime(item));
+
+        actions.append(play, queue);
+      } else if (item.isKitsuInfo) {
+        const searchStreams = el('button', {
+          class: 'btn btn-primary', type: 'button',
+          'aria-label': `Search direct streams for ${item.title}`,
+        }, icon('i-search'), 'Find direct streams');
+        searchStreams.addEventListener('click', () => {
+          const field = $('#animeSearchQuery');
+          if (field) field.value = item.title;
+          const select = $('#animeSearchSource');
+          if (select) select.value = 'all';
+          this.search();
+        });
+        actions.append(searchStreams);
+      }
+
+      li.append(main, actions);
+
+      if (item.isSeries && item.episodes?.length > 1) {
+        const wrap = el('div', { class: 'anime-episodes-wrap' });
+        const toggle = el('button', {
+          class: 'anime-episodes-toggle',
+          type: 'button',
+          'aria-expanded': 'false',
+          text: `Show all episodes (${item.episodes.length}) ▾`,
+        });
+        const epList = el('ul', { class: 'anime-episodes-list' });
+        epList.hidden = true;
+
+        item.episodes.forEach((ep) => {
+          const row = el('li', { class: 'anime-episode-item' });
+          const rowTitle = el('div', { class: 'anime-episode-title', text: ep.title });
+          const rowMeta = el('div', {
+            class: 'anime-episode-meta',
+            text: [
+              ep.duration ? fmtTime(ep.duration) : '',
+              ep.fileSize ? fmtBytes(ep.fileSize) : '',
+              String(ep.fileName || '').split('.').pop().toUpperCase(),
+            ].filter(Boolean).join(' · '),
+          });
+          const rowMain = el('div', { class: 'anime-result-main' }, rowTitle, rowMeta);
+
+          const rowActions = el('div', { class: 'anime-episode-actions' });
+          const rowPlay = el('button', {
+            class: 'btn btn-primary', type: 'button',
+            'aria-label': `Play ${ep.title}`,
+          }, icon('i-play'), 'Play');
+          rowPlay.addEventListener('click', () => this.playEpisode(item, ep));
+
+          const rowQueue = el('button', {
+            class: 'btn', type: 'button',
+            'aria-label': `Queue ${ep.title}`,
+          }, icon('i-plus'), 'Queue');
+          rowQueue.addEventListener('click', () => this.queueEpisode(item, ep));
+
+          rowActions.append(rowPlay, rowQueue);
+          row.append(rowMain, rowActions);
+          epList.append(row);
+        });
+
+        toggle.addEventListener('click', () => {
+          const isHidden = epList.hidden;
+          epList.hidden = !isHidden;
+          toggle.setAttribute('aria-expanded', String(isHidden));
+          toggle.textContent = isHidden
+            ? `Hide episodes (${item.episodes.length}) ▴`
+            : `Show all episodes (${item.episodes.length}) ▾`;
+        });
+
+        wrap.append(toggle, epList);
+        li.append(wrap);
+      }
+
+      list.append(li);
+    });
+  },
+
+  playlistItem(anime, episode = null) {
+    const title = episode ? `${anime.title} — ${episode.title}` : anime.title;
+    const url = episode ? episode.url : anime.url;
+    const type = (episode ? episode.type : anime.type) || detectType(url, 'progressive');
+    return {
+      id: uid(), kind: 'remote', title, url, type,
+    };
+  },
+
+  playEpisode(anime, episode) {
+    const entry = Playlist.add(this.playlistItem(anime, episode), { silent: true });
+    this.close();
+    Playlist.play(entry.id);
+  },
+
+  queueEpisode(anime, episode) {
+    const item = this.playlistItem(anime, episode);
+    const alreadyQueued = Playlist.has(item);
+    const entry = Playlist.add(item, { silent: true });
+    Toast.show(alreadyQueued ? `Already in playlist: ${entry.title}` : `Queued: ${entry.title}`, alreadyQueued ? 'info' : 'ok', 2200);
+  },
+
+  queueAllEpisodes(anime) {
+    if (!anime.episodes || !anime.episodes.length) return;
+    let addedCount = 0;
+    for (const ep of anime.episodes) {
+      const item = this.playlistItem(anime, ep);
+      if (!Playlist.has(item)) {
+        Playlist.add(item, { silent: true });
+        addedCount++;
+      }
+    }
+    Toast.show(addedCount > 0
+      ? `Queued ${addedCount} episode${addedCount > 1 ? 's' : ''} of ${anime.title}`
+      : `All episodes of ${anime.title} already in playlist`, 'ok', 3000);
+  },
+
+  playAnime(anime) {
+    const entry = Playlist.add(this.playlistItem(anime), { silent: true });
+    this.close();
+    Playlist.play(entry.id);
+  },
+
+  queueAnime(anime) {
+    const item = this.playlistItem(anime);
+    const alreadyQueued = Playlist.has(item);
+    const entry = Playlist.add(item, { silent: true });
+    Toast.show(alreadyQueued ? `Already in playlist: ${entry.title}` : `Queued: ${entry.title}`, alreadyQueued ? 'info' : 'ok', 2200);
+  },
+};
+
 /** Drag & drop of files onto the stage / drop zone. */
 const DragDrop = {
   init() {
@@ -5225,6 +6018,7 @@ const App = {
     Playlist.init();
     Sources.init();
     MovieSearch.init();
+    AnimeSearch.init();
     Shell.init();
 
     /* Save everything as soon as the app is backgrounded or closed.

@@ -70,6 +70,12 @@ No frameworks, no build step, no bundler — open it from any static server and 
   a directly playable file are listed — this is not a search of commercial streaming services or the whole
   web, and the licence claims come from uploaders, so open the record and verify the rights before
   streaming.
+- **Anime search & direct streaming**: dedicated search across major open anime catalogues —
+  **Internet Archive Anime Archives** (over 130,000+ anime titles, complete multi-episode series, films, and OVAs with direct MP4/video files),
+  **Kitsu Anime DB** (comprehensive anime database with official synopsis, Japanese & English titles, ratings, episode counts, and trailer streams),
+  **Wikimedia Commons** (pioneering Japanese animations and CC-licensed anime shorts), and **PeerTube** (federated anime streams and AMVs).
+  For multi-episode anime series (e.g. *Death Note*, *Cowboy Bebop*, *Naruto*, *Dragon Ball*, *Serial Experiments Lain*),
+  the player provides individual episode selection, direct playback of any episode, and a one-click **Queue all episodes** action.
 - **Local**: file picker, folder picker (sidecar `.vtt`/`.srt` subtitles are matched by filename),
   drag-and-drop onto the page, plus `Ctrl/Cmd+V` to paste a URL from the clipboard.
 - **Offline**: one click stores the current video (or every HLS/DASH segment) in the browser cache so it
@@ -211,13 +217,34 @@ The file is split into numbered sections so you can jump straight to what you ne
 
 You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
 
-### 2. Play local files
+### 2. Search and stream anime directly
+
+1. Click **Search anime** in the sidebar (or on the empty player screen, or press <kbd>Shift</kbd>+<kbd>A</kbd>).
+   Typing an anime title into the *Online video* field beforehand prefills the search automatically.
+2. Enter an anime title (e.g. *Cowboy Bebop*, *Death Note*, *Naruto*, *Sailor Moon*, *Serial Experiments Lain*).
+   The search queries major open catalogues simultaneously:
+   - **Internet Archive Anime Collection**: Over 130,000+ anime titles, series compilations, movies, and OVAs with direct browser-playable MP4 video streams.
+   - **Kitsu Anime DB**: Rich anime metadata, Japanese and English titles, synopsis, ratings, episode counts, and official trailer video links.
+   - **Wikimedia Commons**: Free and public-domain classic Japanese animations and CC-licensed anime shorts.
+   - **PeerTube**: Federated Fediverse instances with anime video streams.
+3. For **multi-episode anime series**:
+   - The card displays the number of episodes available.
+   - Click **Play Ep 1** to stream the first episode immediately.
+   - Click **Show all episodes** to expand the full episode drawer and view titles, runtimes, and file sizes.
+   - Click **Play** or **Queue** on any individual episode.
+   - Click **Queue all (N)** to add the entire series to your playlist in a single click.
+4. For **single anime films and videos**:
+   - Click **Play** to start playback or **Queue** to add to your queue.
+   - Click **Open direct video** to access the raw `.mp4` file or **View record** for full archive details.
+5. All streams support HTTP Range requests, meaning seeking, prebuffering while paused, and offline browser downloads work seamlessly.
+
+### 3. Play local files
 
 - **Add video(s)** for files, **Add folder** to add a directory (videos + matching `.vtt`/`.srt`).
 - Or drag files anywhere onto the player / drop zone.
 - Local files never leave your device: they are opened as `blob:` URLs from memory.
 
-### 3. Download for offline
+### 4. Download for offline
 
 1. Play (or queue and play) an online video.
 2. Click the ⬇ button in the control bar (or press <kbd>D</kbd>).
@@ -225,7 +252,7 @@ You can also deep-link a video: `index.html?url=https://example.com/video.m3u8`.
    large downloads, then stores every manifest and segment.
 4. When it finishes, the video appears under **Available offline** and plays with the network disabled.
 
-### 4. Playlist
+### 5. Playlist
 
 Items are numbered; the current item is highlighted. Use the ↑/↓ buttons (or drag the row) to reorder,
 ✕ to remove, the header buttons to sort/import/export/clear. **Export** writes a JSON file you can share;
@@ -247,7 +274,7 @@ end starts from the beginning next time. Playing a fifth of a video or longer is
 Nothing is fetched or played on boot; instead the empty state shows the **last open** title with its stored
 position, with **Resume** / **Start over** / dismiss buttons.
 
-### 5. Rotate the screen
+### 6. Rotate the screen
 
 The ↻ button (or <kbd>Shift</kbd>+<kbd>R</kbd>) switches between portrait and landscape using the
 browser's Screen Orientation API, just like rotating your phone. The whole player, controls,
@@ -257,7 +284,7 @@ orientation. Exiting fullscreen releases the lock so physical auto-rotation work
 Browsers that cannot lock orientation show a message asking you to rotate your phone with
 auto-rotate enabled instead. This includes browsers that expose the API but reject locking.
 
-### 6. Subtitles — local files and online search
+### 7. Subtitles — local files and online search
 
 - **Load .vtt / .srt file** adds tracks by hand; dropped subtitle files and sidecar files next to a
   local video are picked up automatically. SRT is converted to WebVTT in memory.
@@ -328,8 +355,9 @@ Press <kbd>?</kbd> inside the app for this list.
 | <kbd>F</kbd> | Fullscreen | <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>P</kbd> | Next / previous item |
 | <kbd>P</kbd> | Picture-in-picture | <kbd>[</kbd> / <kbd>]</kbd> | Subtitle delay ∓0.5 s |
 | <kbd>Shift</kbd>+<kbd>R</kbd> | Switch portrait / landscape | <kbd>Shift</kbd>+<kbd>C</kbd> | Search subtitles online |
-| <kbd>,</kbd> / <kbd>.</kbd> | Frame step (paused) | <kbd>Shift</kbd>+<kbd>&gt;</kbd> / <kbd>&lt;</kbd> | Speed ±0.25× |
-| <kbd>Esc</kbd> | Exit fullscreen / close dialogs | <kbd>?</kbd> | Shortcut help |
+| <kbd>Shift</kbd>+<kbd>A</kbd> | Search anime to stream | <kbd>Shift</kbd>+<kbd>&gt;</kbd> / <kbd>&lt;</kbd> | Speed ±0.25× |
+| <kbd>,</kbd> / <kbd>.</kbd> | Frame step (paused) | <kbd>?</kbd> | Shortcut help |
+| <kbd>Esc</kbd> | Exit fullscreen / close dialogs | | |
 
 Shortcuts are ignored while you are typing in a field, and <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> combinations
 are left to the browser.

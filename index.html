@@ -170,6 +170,7 @@
           <div class="empty-actions">
             <button class="btn btn-primary" id="btnEmptyLocal" type="button"><svg aria-hidden="true"><use href="#i-folder"/></svg>Open local file</button>
             <button class="btn btn-ghost" id="btnEmptySearch" type="button"><svg aria-hidden="true"><use href="#i-search"/></svg>Search movies</button>
+            <button class="btn btn-ghost" id="btnEmptyAnime" type="button"><svg aria-hidden="true"><use href="#i-search"/></svg>Search anime</button>
           </div>
           <p class="empty-hint">Supports MP4 · WebM · M4V · MOV · OGG · MP3 · M4A · MKV (codec dependent) · HLS <code>.m3u8</code> · DASH <code>.mpd</code></p>
         </div>
@@ -391,6 +392,34 @@
         </form>
       </dialog>
 
+      <!-- ---------- Anime search (series, episodes, movies & direct streams) ---------- -->
+      <dialog class="dialog anime-search" id="animeSearchDialog" aria-labelledby="animeSearchHeading">
+        <form id="animeSearchForm" autocomplete="off">
+          <div class="dialog-head">
+            <h2 id="animeSearchHeading">Search anime to stream</h2>
+            <button class="icon-btn sm" type="button" id="btnAnimeSearchClose" aria-label="Close anime search"><svg aria-hidden="true"><use href="#i-close"/></svg></button>
+          </div>
+
+          <div class="dialog-body anime-search-body">
+            <p class="anime-search-note">Search major open catalogues for direct anime video links and streams — Internet Archive's vast anime archive (complete series, episodes, movies and OVAs), Kitsu anime discovery, Wikimedia Commons classic Japanese animation, and federated PeerTube streams. Browse episode lists, queue entire series, or stream directly in the player without ads.</p>
+            <div class="search-row">
+              <input class="input" type="search" id="animeSearchQuery" placeholder="Enter an anime title (e.g. Naruto, Death Note, Cowboy Bebop)" aria-label="Anime title to search for" />
+              <button class="btn btn-primary" type="submit" id="btnAnimeSearchGo"><svg aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></button>
+            </div>
+            <div class="search-row anime-search-filter">
+              <label for="animeSearchSource">Catalogue</label>
+              <select class="input" id="animeSearchSource" aria-label="Catalogue to search"></select>
+            </div>
+            <p class="search-status" id="animeSearchStatus" role="status" aria-live="polite">Enter a title to search anime series, episodes and streams.</p>
+            <ul class="anime-results" id="animeSearchResults" aria-label="Anime search results"></ul>
+          </div>
+
+          <div class="dialog-actions">
+            <button class="btn btn-ghost" type="button" id="btnAnimeSearchCancel">Close</button>
+          </div>
+        </form>
+      </dialog>
+
       <!-- ---------- Speed menu ---------- -->
       <div class="popup" id="speedMenu" role="menu" hidden>
         <p class="popup-title">Playback speed</p>
@@ -430,7 +459,10 @@
         <button class="btn btn-ghost movie-search-button" id="btnSearchMovies" type="button" title="Search public-domain and Creative Commons movies on Internet Archive">
           <svg aria-hidden="true"><use href="#i-search"/></svg><span>Search movies</span>
         </button>
-        <p class="card-hint">Paste a direct file/stream URL, or a regular webpage (pressing Play scans it for media links). Use <strong>Search movies</strong> to find direct video files in Internet Archive items marked public domain or Creative Commons. That catalog does not cover the whole web; license labels are supplied by uploaders and should be checked.</p>
+        <button class="btn btn-ghost anime-search-button" id="btnSearchAnime" type="button" title="Search anime series, episodes and movies to stream directly">
+          <svg aria-hidden="true"><use href="#i-search"/></svg><span>Search anime</span>
+        </button>
+        <p class="card-hint">Paste a direct file/stream URL, or a regular webpage (pressing Play scans it for media links). Use <strong>Search anime</strong> or <strong>Search movies</strong> to find direct video files, series and streams.</p>
       </section>
 
       <section class="card" id="cardLocal">
@@ -506,6 +538,7 @@
       <span><kbd>R</kbd></span><span>Loop: off → all → one</span>
       <span><kbd>Shift</kbd>+<kbd>R</kbd></span><span>Rotate screen between portrait and landscape</span>
       <span><kbd>T</kbd></span><span>Toggle theme</span>
+      <span><kbd>Shift</kbd>+<kbd>A</kbd></span><span>Search anime to stream</span>
       <span><kbd>D</kbd></span><span>Download for offline</span>
       <span><kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>N</kbd></span><span>Next item</span>
       <span><kbd>Shift</kbd>+<kbd>P</kbd></span><span>Previous item</span>

@@ -882,6 +882,87 @@ check('pagehide flushes the playback position',
   Math.abs((closedMarks['url:https://cdn.example.com/added-then-closed.mp4'] || {}).t - 333) < 0.01,
   JSON.stringify(closedMarks).slice(0, 240));
 
+console.log('\n— anime search —');
+$('#btnEmptyAnime').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('empty-state Search anime opens the anime dialog', $('#animeSearchDialog').open === true);
+$('#btnAnimeSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+urlInput.value = 'Cowboy Bebop';
+$('#btnSearchAnime').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('anime name from online field prefills search', $('#animeSearchQuery').value === 'Cowboy Bebop', $('#animeSearchQuery').value);
+
+const animeSearchCalls = [];
+window.fetch = async (url) => {
+  const reqUrl = String(url);
+  animeSearchCalls.push(reqUrl);
+  if (reqUrl.includes('archive.org/advancedsearch.php')) {
+    return {
+      ok: true,
+      json: async () => ({
+        response: {
+          docs: [
+            { identifier: 'bebop-series', title: 'Cowboy Bebop 1080p', year: '1998', mediatype: 'movies' },
+          ],
+        },
+      }),
+    };
+  }
+  if (reqUrl === 'https://archive.org/metadata/bebop-series') {
+    return {
+      ok: true,
+      json: async () => ({
+        metadata: { title: 'Cowboy Bebop 1080p', year: '1998', creator: 'Sunrise', mediatype: 'movies' },
+        files: [
+          { name: 'Cowboy Bebop - 01 - Asteroid Blues.mp4', size: '150000000', length: '1440', format: 'h.264', source: 'derivative' },
+          { name: 'Cowboy Bebop - 02 - Stray Dog Strut.mp4', size: '148000000', length: '1440', format: 'h.264', source: 'derivative' },
+          { name: '__ia_thumb.jpg', format: 'Thumbnail' },
+        ],
+      }),
+    };
+  }
+  if (reqUrl.includes('kitsu.io/api/edge/anime')) {
+    return {
+      ok: true,
+      json: async () => ({
+        data: [{
+          id: '1',
+          attributes: {
+            canonicalTitle: 'Cowboy Bebop',
+            titles: { en: 'Cowboy Bebop', ja_jp: 'カウボーイビバップ' },
+            startDate: '1998-04-03',
+            episodeCount: 26,
+            averageRating: '82.2',
+            synopsis: 'Space Western classic about bounty hunters.',
+            posterImage: { small: 'https://media.kitsu.app/poster.jpg' },
+          },
+        }],
+      }),
+    };
+  }
+  return { ok: false, status: 404, json: async () => ({}) };
+};
+
+$('#animeSearchSource').value = 'all';
+$('#animeSearchSource').dispatchEvent(new window.Event('change', { bubbles: true }));
+$('#animeSearchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await wait(150);
+
+const animeRows = [...document.querySelectorAll('#animeSearchResults .anime-result')];
+check('anime search returns results from multiple sources', animeRows.length >= 2, String(animeRows.length));
+check('series result displays episode count tag', /2 episodes/.test($('#animeSearchResults').textContent));
+check('series result has Queue all button', $('#animeSearchResults button[aria-label*="Queue all"]') !== null);
+
+// Test Queue all
+$('#animeSearchResults button[aria-label*="Queue all"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(300);
+const currentQueue = JSON.parse(window.localStorage.getItem('nebula.playlist.v1')).items;
+check('Queue all adds all episodes to the playlist',
+  currentQueue.some((it) => it.title.includes('Asteroid Blues')) &&
+  currentQueue.some((it) => it.title.includes('Stray Dog Strut')),
+  JSON.stringify(currentQueue.map((it) => it.title)));
+
+$('#btnAnimeSearchCancel').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('closing anime search dialog hides it', $('#animeSearchDialog').open === false);
+
 console.log('\n— errors —');
 const realErrors = logs.errors.filter((e) => !/Not implemented|Could not parse CSS|jsdom|Could not load script|resource/i.test(e));
 check('no uncaught runtime errors', realErrors.length === 0, realErrors.join(' | '));
