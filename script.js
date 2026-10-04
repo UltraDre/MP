@@ -1293,6 +1293,8 @@ const MediaSession = {
 const Controls = {
   seeking: false,
   hideTimer: null,
+  rotation: 0,          // degrees applied to the picture on the stage
+  _stageObserver: null,
 
   init() {
     const v = Player.video;
@@ -1360,6 +1362,11 @@ const Controls = {
     $('#btnPip').addEventListener('click', () => this.togglePip());
     $('#btnFullscreen').addEventListener('click', () => this.toggleFullscreen());
     $('#btnDownload').addEventListener('click', () => Offline.downloadCurrent());
+    // Rotate: Shift+click (or Shift+R) turns the other way, so an overshoot is
+    // one click away from being undone. Optional element: a page served from the
+    // service-worker cache can be one update older than this script, so a
+    // missing button must never take the whole control bar down.
+    $('#btnRotate')?.addEventListener('click', (e) => this.rotateBy(e.shiftKey ? -90 : 90));
 
     /* --- error card --- */
     $('#btnErrorRetry').addEventListener('click', () => Player.retry());
@@ -1422,6 +1429,9 @@ const Controls = {
 
     /* --- keep the seek bar in sync while playing --- */
     v.addEventListener('timeupdate', () => { if (!this.seeking) this.renderProgress(); });
+
+    /* --- measure the stage for the rotated-video layout --- */
+    this.observeStage();
 
     this.renderVolume();
     this.renderSpeed();
@@ -1525,6 +1535,66 @@ const Controls = {
     } catch (err) {
       Toast.err('Picture-in-picture failed: ' + (err.message || err));
     }
+  },
+
+  /* ------------------------------------------------------------------
+   * Video rotation — for sideways phone recordings
+   * --------------------------------------------------------------- */
+
+  /**
+   * Publish the stage's inner size as CSS custom properties.
+   *
+   * A quarter-turned video has to be *laid out* as the turned frame
+   * (stage height × stage width) so that `object-fit: contain` fits the picture
+   * to the rotated box instead of cropping it — and CSS cannot measure its own
+   * container. ResizeObserver covers window resizes, the desktop sidebar opening
+   * and fullscreen in one shot; the listeners are the fallback for older engines.
+   */
+  observeStage() {
+    const stage = $('#playerStage');
+    const measure = () => {
+      const rect = stage.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;   // collapsed/hidden — keep the last numbers
+      stage.style.setProperty('--stage-w', `${Math.round(rect.width)}px`);
+      stage.style.setProperty('--stage-h', `${Math.round(rect.height)}px`);
+    };
+    measure();
+    if (typeof ResizeObserver === 'function') {
+      this._stageObserver = new ResizeObserver(measure);
+      this._stageObserver.observe(stage);
+    } else {
+      window.addEventListener('resize', measure);
+      document.addEventListener('fullscreenchange', measure);
+    }
+  },
+
+  /** Quarter-turn the picture. `delta` is normally +90 or −90 degrees. */
+  rotateBy(delta = 90) { return this.setRotation(this.rotation + delta); },
+
+  /**
+   * Apply a rotation to the stage and keep the button in sync.
+   *
+   * The rotation is session state, not a per-video setting: it stays on until it
+   * is turned back (four quarter turns = full circle), which is what you want
+   * when the next episode is filmed the same way up. The angle is not persisted,
+   * so reopening the app starts upright again.
+   */
+  setRotation(degrees) {
+    const r = (((Math.round(Number(degrees) / 90) * 90) % 360) + 360) % 360;
+    this.rotation = r;
+    const stage = $('#playerStage');
+    if (r) stage.dataset.rot = String(r);
+    else delete stage.dataset.rot;
+    const btn = $('#btnRotate');
+    if (btn) {                                  // absent on a page one update old
+      btn.setAttribute('aria-pressed', String(r !== 0));
+      btn.setAttribute('aria-label', r === 0 ? 'Rotate video 90° clockwise' : `Video rotated ${r}° — rotate another 90°`);
+      btn.title = r === 0
+        ? 'Rotate 90° clockwise — hold Shift to turn anticlockwise'
+        : `${r}° — click to turn another 90° (Shift+click to turn back)`;
+    }
+    Toast.show(r === 0 ? 'Rotation back to normal' : `Rotated ${r}°`, 'info', 1500, 'rotate');
+    return r;
   },
 
   /* Chrome is toggled by a single tap — no auto-hide, no mouse-move reveal. */
@@ -1932,7 +2002,13 @@ const Keyboard = {
         if (e.shiftKey) SubtitleSearch.open(); else Subtitles.toggleEnabled();
         break;
       case 's': case 'S': e.preventDefault(); Toast.show(Playlist.toggleShuffle() ? 'Shuffle on' : 'Shuffle off', 'info', 1200, 'mode'); break;
-      case 'r': case 'R': e.preventDefault(); Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode'); break;
+      case 'r': case 'R':
+        e.preventDefault();
+        // Shift+R = quarter turn of the picture (three more turns bring it back);
+        // plain R keeps toggling the loop mode, as it always has.
+        if (e.shiftKey) Controls.rotateBy(90);
+        else Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode');
+        break;
       case 't': case 'T': e.preventDefault(); Theme.toggle(); break;
       case 'd': case 'D': e.preventDefault(); Offline.downloadCurrent(); break;
       case 'n': e.preventDefault(); Playlist.advance(1); break;

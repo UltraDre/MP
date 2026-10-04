@@ -233,8 +233,10 @@ const check = (name, cond, extra = '') => {
 /* ------------------------- tests ------------------------- */
 console.log('\n— lifecycle —');
 await fire('install', {});
-check('install completes and precaches the shell', (await sandbox.caches.open('nebula-shell-1.0.5')).map.size >= 8,
-  String((await sandbox.caches.open('nebula-shell-1.0.5')).map.size));
+// Look the shell cache up by prefix so a version bump does not break the harness.
+const shellCacheName = (await sandbox.caches.keys()).find((n) => n.startsWith('nebula-shell-'));
+check('install completes and precaches the shell', (await sandbox.caches.open(shellCacheName)).map.size >= 8,
+  String((await sandbox.caches.open(shellCacheName)).map.size));
 check('install skips waiting', swSelf.skipped === true);
 await fire('activate', {});
 

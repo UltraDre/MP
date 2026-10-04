@@ -159,6 +159,30 @@ check('volume readout updated', $('#volumeOut').textContent === '30%', $('#volum
 await wait(250);
 check('volume persisted in localStorage', JSON.parse(window.localStorage.getItem('nebula.settings.v1')).volume === 0.3);
 
+console.log('\n— video rotation —');
+const rotateBtn = $('#btnRotate');
+const rotStage = $('#playerStage');
+check('rotate button lives in the control bar', rotateBtn !== null && rotateBtn.closest('#controlsBar') !== null);
+check('starts upright', !rotStage.hasAttribute('data-rot') && rotateBtn.getAttribute('aria-pressed') === 'false');
+const rotate = (shift = false) => rotateBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true, shiftKey: shift }));
+rotate();
+check('click turns the picture 90° clockwise', rotStage.getAttribute('data-rot') === '90');
+check('button reports the rotated state', rotateBtn.getAttribute('aria-pressed') === 'true' && /90/.test(rotateBtn.getAttribute('aria-label')));
+rotate();
+check('a second click reaches 180°', rotStage.getAttribute('data-rot') === '180');
+rotate(true);
+check('Shift+click turns back anticlockwise', rotStage.getAttribute('data-rot') === '90');
+rotate(true);
+check('back to upright clears the state', !rotStage.hasAttribute('data-rot') && rotateBtn.getAttribute('aria-pressed') === 'false');
+key('R', { shiftKey: true });
+check('Shift+R rotates from the keyboard', rotStage.getAttribute('data-rot') === '90');
+const loopClassBefore = document.body.className.match(/loop-\w+/)?.[0];
+key('r');
+check('plain R still toggles the loop mode', document.body.className.match(/loop-\w+/)?.[0] !== loopClassBefore);
+check('…and leaves the rotation alone', rotStage.getAttribute('data-rot') === '90');
+for (let i = 0; i < 3; i++) rotate();
+check('four quarter turns complete a full turn', !rotStage.hasAttribute('data-rot'));
+
 console.log('\n— speed menu —');
 $('#btnSpeed').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('speed menu opens', $('#speedMenu').hidden === false);

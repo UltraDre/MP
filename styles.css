@@ -352,6 +352,30 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
   object-fit: contain;
 }
 
+/* Video rotation (sideways phone recordings). The <video> element itself is
+   turned, so the picture and its subtitles rotate together — the control bar,
+   the spinner, the error card, the drop veil and every gesture stay upright
+   (hit-testing follows the transform, so taps and swipes keep working).
+
+   For 90°/270° the element is first laid out as the *turned* frame — stage
+   height × stage width — and then spun about its centre: the rotated box matches
+   the stage exactly, which is what lets `object-fit: contain` letterbox the
+   picture the way a portrait screen would instead of cropping it. The stage
+   clips the un-rotated overflow (overflow: hidden). --stage-w / --stage-h are
+   measured by Controls.observeStage(); the 100% fallbacks only matter if that
+   measurement never ran (no JS → no rotation either). */
+.stage[data-rot] .video { position: absolute; left: 0; top: 0; }
+.stage[data-rot="90"] .video,
+.stage[data-rot="270"] .video {
+  width: var(--stage-h, 100%);
+  height: var(--stage-w, 100%);
+  left: calc((100% - var(--stage-h, 100%)) / 2);
+  top: calc((100% - var(--stage-w, 100%)) / 2);
+}
+.stage[data-rot="90"] .video { transform: rotate(90deg); }
+.stage[data-rot="180"] .video { transform: rotate(180deg); }
+.stage[data-rot="270"] .video { transform: rotate(-90deg); }
+
 /* Big center play button */
 .big-play {
   position: absolute; inset: 0; margin: auto;
