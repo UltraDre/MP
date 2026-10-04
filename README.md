@@ -36,6 +36,10 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 - Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute with a 0–200% software-gain range, fullscreen, picture-in-picture,
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
+- **Edge-to-edge picture with overlaid controls**: the video fills the whole window, and the control
+  bar floats on top of it. The app starts with the controls hidden for a clean picture — **tap / click
+  the video once** to bring them up, and tap again to hide them. The title bar and the playlist toggle
+  follow the same show/hide so nothing shrinks or obscures the media.
 - **Rotate the screen** with the ↻ button or <kbd>Shift</kbd>+<kbd>R</kbd>: switch between portrait
   and landscape with the video, controls and overlays together (supported mobile browsers).
 - Online progressive, HLS and DASH sources request ahead buffering to help reduce stalls. **Pausing does
@@ -570,7 +574,7 @@ These are inherent to a browser-based player (no backend, no DRM):
   [Streaming libraries](#streaming-libraries-hlsjs--dashjs)).
 - **Speed presets** — the `speeds` array in `Menus.init()`.
 - **Sample streams** — `Sources.SAMPLES`.
-- **Cache version** — bump `VERSION` in `service-worker.js` to invalidate the app shell after changes.
+- **Cache versions** — bump `VERSION` in `service-worker.js` to refresh the app shell after changes. Keep `DATA_VERSION` unchanged for shell-only releases so stored offline videos survive; bump it only when the offline media/index format changes.
 
 ### Adding a search catalogue
 

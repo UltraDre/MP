@@ -43,7 +43,20 @@ const unstyled = [...htmlClasses].filter((c) => c && !cssClasses.has(c));
 if (unstyled.length) console.log('  ! classes in HTML without CSS rules: ' + unstyled.join(', '));
 else ok('every HTML class is styled');
 
-/* 5. Paren nesting sanity, with a real scanner (strings/templates/regex/comments) */
+/* 5. The video stage fills the player and controls are overlaid on that stage. */
+const edgeLayoutCss = css.slice(css.indexOf('11. Edge-to-edge media player layout'));
+const stageRule = edgeLayoutCss.match(/(?:^|\n)\.stage\s*\{([^}]*)\}/)?.[1] || '';
+const controlsRule = edgeLayoutCss.match(/(?:^|\n)\.controls\s*\{([^}]*)\}/)?.[1] || '';
+if (/position:\s*absolute/.test(stageRule) && /inset:\s*0/.test(stageRule)
+  && /width:\s*100%/.test(stageRule) && /height:\s*100%/.test(stageRule)) {
+  ok('media stage covers the player viewport');
+} else fail('media stage is not edge-to-edge');
+if (/position:\s*absolute/.test(controlsRule) && /bottom:\s*0/.test(controlsRule)
+  && /width:\s*100%/.test(controlsRule)) {
+  ok('controls overlay the full-width media stage');
+} else fail('controls are not overlaid on the media stage');
+
+/* 6. Paren nesting sanity, with a real scanner (strings/templates/regex/comments) */
 function scanDepth(src) {
   const REGEX_OK = /[=(,:;[!&|?{+\-*%<>~^]|^$/;
   let depth = 0, minDepth = 0, i = 0;
@@ -85,12 +98,12 @@ for (const [name, src] of [['script.js', js], ['service-worker.js', sw]]) {
   else ok(`${name}: paren nesting is sane`);
 }
 
-/* 6. Service worker must not reference undefined top-level identifiers */
+/* 7. Service worker must not reference undefined top-level identifiers */
 const swHandlers = ['install', 'activate', 'fetch', 'message'].filter((h) => sw.includes(`addEventListener('${h}'`));
 if (swHandlers.length === 4) ok('service worker registers install/activate/fetch/message');
 else fail('service worker handlers: ' + swHandlers.join(', '));
 
-/* 7. Manifest sanity */
+/* 8. Manifest sanity */
 const manifest = JSON.parse(fs.readFileSync(`${root}/manifest.json`, 'utf8'));
 for (const key of ['name', 'short_name', 'start_url', 'display', 'icons', 'scope']) {
   if (!manifest[key]) fail('manifest missing ' + key);
@@ -100,7 +113,7 @@ const missingIconsFiles = iconFiles.filter((f) => !fs.existsSync(`${root}/${f}`)
 if (missingIconsFiles.length) fail('manifest icons missing on disk: ' + missingIconsFiles.join(', '));
 else ok('manifest complete, icons present');
 
-/* 8. Files referenced by index.html must exist */
+/* 9. Files referenced by index.html must exist */
 const srcs = [...html.matchAll(/(?:src|href)="((?!https?:|#|data:)[^"]+)"/g)].map((m) => m[1]);
 const missingFiles = [...new Set(srcs)].filter((s) => !fs.existsSync(`${root}/${s}`));
 if (missingFiles.length) fail('missing local files: ' + missingFiles.join(', '));

@@ -23,10 +23,13 @@
 /* ---------------------------------------------------------------------
  * Configuration
  * ------------------------------------------------------------------ */
-const VERSION = '1.0.6';
+const VERSION = '1.0.7';
+// Keep offline downloads and their index across shell-only releases. Bump this
+// separately only when the stored media/index format becomes incompatible.
+const DATA_VERSION = '1.0.6';
 const SHELL_CACHE = `nebula-shell-${VERSION}`;
-const MEDIA_CACHE = `nebula-media-${VERSION}`;
-const INDEX_CACHE = `nebula-index-${VERSION}`;
+const MEDIA_CACHE = `nebula-media-${DATA_VERSION}`;
+const INDEX_CACHE = `nebula-index-${DATA_VERSION}`;
 const KEEP_CACHES = [SHELL_CACHE, MEDIA_CACHE, INDEX_CACHE];
 
 /** Folder-like prefix for internal URLs (kept out of the app's real routes). */

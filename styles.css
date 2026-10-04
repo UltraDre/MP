@@ -1165,9 +1165,9 @@ kbd {
 }
 
 /* =====================================================================
-   11. Minimal, clean workspace skin
-   Keep the player controls and existing dialogs intact; simplify the
-   chrome around them into a quiet, responsive media workspace.
+   11. Edge-to-edge media player layout
+   Keep the player and its controls on one full-viewport display; app chrome
+   and the library remain overlays so they never shrink the video stage.
    =================================================================== */
 :root {
   --accent: #8d9cff;
@@ -1222,27 +1222,27 @@ body {
 }
 
 .app-header {
-  position: relative;
-  inset: auto;
+  position: absolute;
+  inset: 0 0 auto;
   z-index: 30;
-  flex: 0 0 auto;
   min-height: var(--header-h);
   padding: calc(8px + env(safe-area-inset-top)) clamp(16px, 2.4vw, 32px) 8px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-  color: var(--text);
+  background: linear-gradient(to bottom, rgba(0, 0, 0, .76), transparent);
+  border: 0;
+  color: #fff;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
+  transition: opacity var(--t), transform var(--t);
 }
 .app-header .brand-name,
 .app-header .brand-name span,
 .app-header .icon-btn,
-.app-header .btn { color: var(--text); }
-.app-header .brand-name span { color: var(--text-mute); }
+.app-header .btn { color: #fff; }
+.app-header .brand-name span { color: rgba(255, 255, 255, .72); }
 .app-header .net-pill {
-  background: var(--surface-2);
-  border-color: var(--line);
-  color: var(--text-dim);
+  background: rgba(255, 255, 255, .08);
+  border-color: rgba(255, 255, 255, .16);
+  color: rgba(255, 255, 255, .82);
 }
 .brand-logo {
   width: 36px;
@@ -1258,45 +1258,46 @@ body {
 .net-pill .dot { box-shadow: none; }
 
 .layout {
+  position: relative;
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
-  gap: 18px;
+  gap: 0;
   flex: 1 1 auto;
-  min-height: 0;
-  height: auto;
-  padding: 20px;
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.player-column {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
   min-width: 0;
   min-height: 0;
   height: 100%;
   padding: 0;
-  background: transparent;
+  overflow: visible;
+  background: #000;
+}
+
+.player-column {
+  position: relative;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: visible;   /* overlays (sheet / speed menu) may extend past the picture */
+  background: #000;
 }
 
 .stage {
-  position: relative;
-  inset: auto;
-  flex: 0 1 auto;
-  width: auto;
-  height: min(60dvh, 54vw);
-  max-width: 100%;
-  aspect-ratio: 16 / 9;
-  background: #08090b;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, .2);
-  cursor: default;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  aspect-ratio: auto;
+  background: #000;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
 }
-.video { background: #08090b; }
+.video { background: #000; }
 
 .empty-state, .error-box {
   inset: 0;
@@ -1336,23 +1337,25 @@ body.is-empty .controls { display: none; }
 .big-play:hover { background: var(--accent); }
 
 .controls {
-  position: relative;
-  inset: auto;
-  flex: 0 0 auto;
-  width: min(100%, 1100px);
-  padding: 12px 16px 14px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 8;
+  width: 100%;
+  padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, rgba(0, 0, 0, .9), rgba(0, 0, 0, .58) 64%, transparent);
+  border: 0;
+  border-radius: 0;
   color: #f3f4f6;
   --text: #f3f4f6;
   --text-dim: #b7bac2;
   --text-mute: #858a95;
-  --surface-2: #22252b;
-  --surface-3: #30343b;
-  --line: rgba(255, 255, 255, .08);
-  --line-strong: rgba(255, 255, 255, .14);
-  box-shadow: var(--shadow-sm);
+  --surface-2: rgba(255, 255, 255, .1);
+  --surface-3: rgba(255, 255, 255, .22);
+  --line: rgba(255, 255, 255, .16);
+  --line-strong: rgba(255, 255, 255, .22);
+  box-shadow: none;
 }
 .controls .icon-btn { color: #c4c8d0; }
 .controls .icon-btn:hover { color: #fff; background: rgba(255, 255, 255, .08); }
@@ -1376,7 +1379,11 @@ body.captions-on #btnCaptions { color: #b7c0ff; background: rgba(141, 156, 255, 
   transform: translateY(8px);
   pointer-events: none;
 }
-body.controls-hidden .app-header,
+body.controls-hidden .app-header {
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+}
 body.is-empty.controls-hidden .app-header {
   opacity: 1;
   transform: none;
@@ -1384,13 +1391,15 @@ body.is-empty.controls-hidden .app-header {
 }
 
 .download-bar {
-  position: relative;
-  inset: auto;
-  flex: 0 0 auto;
-  width: min(100%, 1100px);
-  color: var(--text);
-  background: var(--surface);
-  border-color: var(--line-strong);
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(118px + env(safe-area-inset-bottom));
+  z-index: 9;
+  width: auto;
+  color: #fff;
+  background: rgba(10, 14, 28, .88);
+  border-color: rgba(255, 255, 255, .14);
   border-radius: 12px;
   box-shadow: var(--shadow-sm);
 }
@@ -1499,47 +1508,48 @@ textarea:focus { border-color: var(--accent); background: var(--surface); }
 
 @media (min-width: 1080px) {
   .layout {
-    grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
-    gap: 20px;
-    padding: 20px clamp(20px, 2.4vw, 36px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 0;
   }
   .sidebar {
-    position: relative;
-    inset: auto;
-    width: 100%;
-    height: 100%;
-    max-height: 100%;
-    padding: 0 4px 4px 0;
+    position: fixed;
+    z-index: 60;
+    inset: 0 0 0 auto;
+    width: min(var(--sidebar-w), 100vw);
+    height: auto;
+    max-height: none;
+    padding: 16px;
     overflow: auto;
-    background: transparent;
+    background: var(--bg);
     border: 0;
+    border-left: 1px solid var(--line-strong);
     border-radius: 0;
-    box-shadow: none;
-    transform: none;
-    transition: none;
+    box-shadow: var(--shadow);
+    transform: translateX(110%);
+    transition: transform var(--t);
   }
   .sidebar.open { transform: none; }
   .sidebar-handle { display: none; }
   .sidebar-hint-mobile { display: none !important; }
-  .panel-toggle { display: none; }
-  .scrim { display: none !important; }
+  .panel-toggle { display: inline-grid; }
 }
 
 @media (max-width: 1079px) {
-  .layout { padding: 16px; }
+  .layout { padding: 0; gap: 0; }
   .sidebar { padding-inline: 14px; }
   .player-column { padding: 0; }
   .app-header { padding-inline: 16px; }
 }
 
 @media (max-width: 720px) {
-  .layout { padding: 12px; gap: 12px; }
+  .layout { padding: 0; gap: 0; }
   .app-header { min-height: 58px; padding: calc(7px + env(safe-area-inset-top)) 12px 7px; }
   .brand-logo { width: 32px; height: 32px; border-radius: 9px; }
   .header-actions { gap: 2px; }
   .header-actions .icon-btn { width: 38px; height: 38px; }
-  .stage { height: min(55dvh, 54vw); border-radius: 11px; }
-  .controls { width: 100%; padding: 10px 11px 12px; border-radius: 11px; }
+  .stage { height: 100%; border-radius: 0; }
+  .controls { width: 100%; padding: 10px 11px calc(12px + env(safe-area-inset-bottom)); border-radius: 0; }
   .buttons-row { gap: 4px; }
   .btn-group.secondary { gap: 0; }
   .title-strip { padding-bottom: 7px; }

@@ -232,6 +232,13 @@ const check = (name, cond, extra = '') => {
 
 /* ------------------------- tests ------------------------- */
 console.log('\n— lifecycle —');
+// Simulate an existing installation: shell updates must leave its offline media
+// cache and download index intact.
+const legacyMediaCache = await sandbox.caches.open('nebula-media-1.0.6');
+legacyMediaCache.map.set('https://cdn.test/already-downloaded.mp4', new Response('saved media'));
+const legacyIndexCache = await sandbox.caches.open('nebula-index-1.0.6');
+legacyIndexCache.map.set(new URL('__nebula__/index.json', SCOPED).toString(),
+  new Response(JSON.stringify({ version: 1, items: [] }), { headers: { 'Content-Type': 'application/json' } }));
 await fire('install', {});
 // Look the shell cache up by prefix so a version bump does not break the harness.
 const shellCacheName = (await sandbox.caches.keys()).find((n) => n.startsWith('nebula-shell-'));
@@ -239,6 +246,12 @@ check('install completes and precaches the shell', (await sandbox.caches.open(sh
   String((await sandbox.caches.open(shellCacheName)).map.size));
 check('install skips waiting', swSelf.skipped === true);
 await fire('activate', {});
+const retainedCacheNames = await sandbox.caches.keys();
+const retainedMedia = await (await sandbox.caches.open('nebula-media-1.0.6'))
+  .match('https://cdn.test/already-downloaded.mp4');
+check('shell update preserves existing offline media and index caches',
+  retainedCacheNames.includes('nebula-media-1.0.6') && retainedCacheNames.includes('nebula-index-1.0.6')
+    && retainedMedia && await retainedMedia.text() === 'saved media');
 
 console.log('\n— app shell —');
 const shellRes = await fetchEvent(SCOPED, { mode: 'navigate' });
