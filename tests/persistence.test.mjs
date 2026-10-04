@@ -467,11 +467,10 @@ console.log('\n— an older page with the new script —');
   check('the saved title is still highlighted', !!window.document.querySelector('#playlistList .item.is-current'));
   check('nothing threw while booting', errors().length === 0, errors().join(' | '));
   check('the app simply skips the pop-up', $('#resumeDialog') === null);
-  // The rotate shortcut must survive the missing button (the picture turns, the
-  // button state is skipped) instead of throwing on a null element.
+  // The screen rotation shortcut must survive a missing button and unsupported API.
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'R', shiftKey: true, bubbles: true, cancelable: true }));
-  check('Shift+R still rotates without the new button',
-    $('#playerStage').getAttribute('data-rot') === '90' && errors().length === 0, errors().join(' | '));
+  check('Shift+R is safe without the new button',
+    !$('#playerStage').hasAttribute('data-rot') && errors().length === 0, errors().join(' | '));
   window.close();
 }
 

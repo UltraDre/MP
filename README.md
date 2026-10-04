@@ -36,12 +36,8 @@ No frameworks, no build step, no bundler — open it from any static server and 
 
 - Play/pause, seek bar with hover tooltip + light-gray buffered range, volume/mute, fullscreen, picture-in-picture,
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
-- **Rotate the picture** for sideways phone recordings: the ↻ button in the control bar (or
-  <kbd>Shift</kbd>+<kbd>R</kbd>) turns the video a quarter turn clockwise, four turns bring it back to normal, and
-  <kbd>Shift</kbd>+click / <kbd>Shift</kbd>+<kbd>R</kbd> turns it anticlockwise so an overshoot is one click away
-  from being undone. The video element itself is turned, so embedded subtitles rotate with the picture while the
-  control bar, overlays and gestures stay upright; the turned picture is fitted to the screen (letterboxed) rather
-  than cropped.
+- **Rotate the screen** with the ↻ button or <kbd>Shift</kbd>+<kbd>R</kbd>: switch between portrait
+  and landscape with the video, controls and overlays together (supported mobile browsers).
 - Online progressive, HLS and DASH sources request ahead buffering to help reduce stalls. **Pausing does
   not stop the download**: while playback is paused the forward-buffer targets are raised so the stream
   keeps filling ahead (up to the browser/SourceBuffer quota and the host's limits), and hls.js is nudged
@@ -179,7 +175,7 @@ The file is split into numbered sections so you can jump straight to what you ne
 | 05 | `StreamEngine` | loads hls.js/dash.js on demand and attaches streams |
 | 06 | `Player` + `Resume` | the core playback controller (`load()`, seeking, volume, errors) and the persistent resume-position store |
 | 07 | `MediaSession` | OS media keys / lock-screen metadata |
-| 08–09 | `Controls`, `Menus` | control bar binding (incl. video rotation), speed menu, popups |
+| 08–09 | `Controls`, `Menus` | control bar binding (incl. screen rotation), speed menu, popups |
 | 10–11 | `Gestures`, `Keyboard` | double-tap/double-click gestures & shortcuts |
 | 12 | `Playlist` | queue, reordering, alphabetical sort, persistence, reconnecting saved local files, import/export |
 | 13 | `Offline` | talking to the service worker, downloads UI |
@@ -251,23 +247,15 @@ end starts from the beginning next time. Playing a fifth of a video or longer is
 Nothing is fetched or played on boot; instead the empty state shows the **last open** title with its stored
 position, with **Resume** / **Start over** / dismiss buttons.
 
-### 5. Rotate a sideways video
+### 5. Rotate the screen
 
-Phone footage is often recorded sideways. The ↻ button in the control bar (or <kbd>Shift</kbd>+<kbd>R</kbd>) turns
-the picture a quarter turn clockwise each time — 90° → 180° → 270° → upright again; <kbd>Shift</kbd>+click (or
-<kbd>Shift</kbd>+<kbd>R</kbd>) turns it anticlockwise, so overshooting by one step is one click away from being
-undone. The turned picture is fitted to the player area (letterboxed, never cropped) and the button stays highlighted
-while a rotation is active, so the state is visible at a glance.
-
-The `<video>` element itself is turned rather than a copy of the picture, which means:
-
-- subtitles drawn inside the video (embedded or `<track>` files) rotate with it, while the control bar, spinner,
-  error card and drop overlay stay upright;
-- taps, swipes and double-taps keep their screen meaning — a swipe up still raises the volume, a double-tap still
-  plays/pauses;
-- the rotation is *session* state, not a saved per-video setting: it stays on — including when the playlist moves to
-  the next item, which is what you want for a batch of clips shot the same way — until you turn it back, and it
-  resets to upright when the app is reopened.
+The ↻ button (or <kbd>Shift</kbd>+<kbd>R</kbd>) switches between portrait and landscape using the
+browser's Screen Orientation API, just like rotating your phone. The whole player, controls,
+subtitles and overlays follow the screen; the video itself is not transformed.
+The player enters fullscreen when available because mobile browsers commonly require it to lock
+orientation. Exiting fullscreen releases the lock so physical auto-rotation works again.
+Browsers that cannot lock orientation show a message asking you to rotate your phone with
+auto-rotate enabled instead. This includes browsers that expose the API but reject locking.
 
 ### 6. Subtitles — local files and online search
 
@@ -339,7 +327,7 @@ Press <kbd>?</kbd> inside the app for this list.
 | <kbd>Home</kbd> / <kbd>End</kbd> | Start / end | <kbd>D</kbd> | Download for offline |
 | <kbd>F</kbd> | Fullscreen | <kbd>N</kbd> / <kbd>Shift</kbd>+<kbd>P</kbd> | Next / previous item |
 | <kbd>P</kbd> | Picture-in-picture | <kbd>[</kbd> / <kbd>]</kbd> | Subtitle delay ∓0.5 s |
-| <kbd>Shift</kbd>+<kbd>R</kbd> | Rotate the video 90° clockwise | <kbd>Shift</kbd>+<kbd>C</kbd> | Search subtitles online |
+| <kbd>Shift</kbd>+<kbd>R</kbd> | Switch portrait / landscape | <kbd>Shift</kbd>+<kbd>C</kbd> | Search subtitles online |
 | <kbd>,</kbd> / <kbd>.</kbd> | Frame step (paused) | <kbd>Shift</kbd>+<kbd>&gt;</kbd> / <kbd>&lt;</kbd> | Speed ±0.25× |
 | <kbd>Esc</kbd> | Exit fullscreen / close dialogs | <kbd>?</kbd> | Shortcut help |
 
@@ -506,9 +494,8 @@ These are inherent to a browser-based player (no backend, no DRM):
     A position is written on pause, on seek, roughly every 10 s during playback and when the app is
     hidden or closed — so a browser that is killed outright (no `pagehide` at all) can lose the last few
     seconds of a *playing* video; the queue itself is written within 200 ms of the change.
-16. **Video rotation is a display style, not an edit** — a `transform` on the `<video>` element. It is not saved with
-    a video, it is not applied by picture-in-picture windows or iOS's native fullscreen player (those surfaces render
-    the original orientation), and a downloaded copy keeps the original pixels.
+16. **Screen rotation depends on browser support** — unsupported browsers require physical phone
+    rotation with auto-rotate enabled. It does not modify downloaded videos or PiP windows.
 
 ---
 
@@ -602,7 +589,7 @@ node tests/persistence.test.mjs       # close/reopen round trips: queue, order, 
   a fake network and fake clients. It verifies HLS/DASH URL collection, byte accounting, range
   responses (`206` + `Content-Range`), aliasing, cancellation and cache cleanup.
 - `ui-smoke.test.mjs` boots `index.html` + `script.js` in jsdom with media-element stubs and exercises
-  shortcuts, gestures (including the touch double-tap timing), video rotation, playlist reordering, movie/series search
+  shortcuts, gestures (including the touch double-tap timing), screen rotation, playlist reordering, movie/series search
   (mocked Internet Archive, Wikimedia Commons and SepiaSearch/PeerTube backends, licence filtering,
   direct-URL resolution and the catalogue picker), subtitles, the online subtitle search (with a mocked
   OpenSubtitles/Stremio backend, language filters and one-click loading), resume-position persistence
