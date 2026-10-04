@@ -1293,7 +1293,8 @@ const MediaSession = {
 const Controls = {
   seeking: false,
   hideTimer: null,
-  rotation: 0,          // degrees applied to the picture on the stage
+  rotating: false,      // serialize screen orientation requests
+  orientationLocked: false,
   _stageObserver: null,
 
   init() {
@@ -1362,11 +1363,8 @@ const Controls = {
     $('#btnPip').addEventListener('click', () => this.togglePip());
     $('#btnFullscreen').addEventListener('click', () => this.toggleFullscreen());
     $('#btnDownload').addEventListener('click', () => Offline.downloadCurrent());
-    // Rotate: Shift+click (or Shift+R) turns the other way, so an overshoot is
-    // one click away from being undone. Optional element: a page served from the
-    // service-worker cache can be one update older than this script, so a
-    // missing button must never take the whole control bar down.
-    $('#btnRotate')?.addEventListener('click', (e) => this.rotateBy(e.shiftKey ? -90 : 90));
+    // Optional for older cached HTML shells.
+    $('#btnRotate')?.addEventListener('click', () => this.rotateScreen());
 
     /* --- error card --- */
     $('#btnErrorRetry').addEventListener('click', () => Player.retry());
@@ -1418,6 +1416,11 @@ const Controls = {
     /* --- fullscreen state --- */
     document.addEventListener('fullscreenchange', () => {
       const fs = !!document.fullscreenElement;
+      if (!fs && this.orientationLocked) {
+        window.screen.orientation?.unlock?.();
+        this.orientationLocked = false;
+      }
+      this.renderOrientation();
       document.body.classList.toggle('is-fullscreen', fs);
       $('#btnFullscreen').setAttribute('aria-label', fs ? 'Exit fullscreen' : 'Fullscreen');
     });
@@ -1430,8 +1433,10 @@ const Controls = {
     /* --- keep the seek bar in sync while playing --- */
     v.addEventListener('timeupdate', () => { if (!this.seeking) this.renderProgress(); });
 
-    /* --- measure the stage for the rotated-video layout --- */
-    this.observeStage();
+    /* Keep labels in sync with physical phone rotation too. */
+    window.screen.orientation?.addEventListener?.('change', () => this.renderOrientation());
+    window.addEventListener('resize', () => this.renderOrientation());
+    this.renderOrientation();
 
     this.renderVolume();
     this.renderSpeed();
@@ -1537,64 +1542,51 @@ const Controls = {
     }
   },
 
-  /* ------------------------------------------------------------------
-   * Video rotation — for sideways phone recordings
-   * --------------------------------------------------------------- */
-
-  /**
-   * Publish the stage's inner size as CSS custom properties.
-   *
-   * A quarter-turned video has to be *laid out* as the turned frame
-   * (stage height × stage width) so that `object-fit: contain` fits the picture
-   * to the rotated box instead of cropping it — and CSS cannot measure its own
-   * container. ResizeObserver covers window resizes, the desktop sidebar opening
-   * and fullscreen in one shot; the listeners are the fallback for older engines.
-   */
-  observeStage() {
-    const stage = $('#playerStage');
-    const measure = () => {
-      const rect = stage.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;   // collapsed/hidden — keep the last numbers
-      stage.style.setProperty('--stage-w', `${Math.round(rect.width)}px`);
-      stage.style.setProperty('--stage-h', `${Math.round(rect.height)}px`);
-    };
-    measure();
-    if (typeof ResizeObserver === 'function') {
-      this._stageObserver = new ResizeObserver(measure);
-      this._stageObserver.observe(stage);
-    } else {
-      window.addEventListener('resize', measure);
-      document.addEventListener('fullscreenchange', measure);
-    }
+  isLandscape() {
+    const type = window.screen.orientation?.type;
+    return type ? type.startsWith('landscape') : window.innerWidth > window.innerHeight;
   },
 
-  /** Quarter-turn the picture. `delta` is normally +90 or −90 degrees. */
-  rotateBy(delta = 90) { return this.setRotation(this.rotation + delta); },
-
-  /**
-   * Apply a rotation to the stage and keep the button in sync.
-   *
-   * The rotation is session state, not a per-video setting: it stays on until it
-   * is turned back (four quarter turns = full circle), which is what you want
-   * when the next episode is filmed the same way up. The angle is not persisted,
-   * so reopening the app starts upright again.
-   */
-  setRotation(degrees) {
-    const r = (((Math.round(Number(degrees) / 90) * 90) % 360) + 360) % 360;
-    this.rotation = r;
-    const stage = $('#playerStage');
-    if (r) stage.dataset.rot = String(r);
-    else delete stage.dataset.rot;
+  renderOrientation() {
     const btn = $('#btnRotate');
-    if (btn) {                                  // absent on a page one update old
-      btn.setAttribute('aria-pressed', String(r !== 0));
-      btn.setAttribute('aria-label', r === 0 ? 'Rotate video 90° clockwise' : `Video rotated ${r}° — rotate another 90°`);
-      btn.title = r === 0
-        ? 'Rotate 90° clockwise — hold Shift to turn anticlockwise'
-        : `${r}° — click to turn another 90° (Shift+click to turn back)`;
+    if (!btn) return;
+    const landscape = this.isLandscape();
+    btn.setAttribute('aria-pressed', String(landscape));
+    btn.setAttribute('aria-label', `Rotate screen to ${landscape ? 'portrait' : 'landscape'}`);
+    btn.title = `${btn.getAttribute('aria-label')} (Shift+R)`;
+    btn.disabled = this.rotating;
+  },
+
+  async rotateScreen() {
+    if (this.rotating) return;
+    const orientation = window.screen.orientation;
+    if (!orientation?.lock) {
+      Toast.warn('Screen rotation is not supported by this browser. Rotate your phone with auto-rotate enabled.');
+      return;
     }
-    Toast.show(r === 0 ? 'Rotation back to normal' : `Rotated ${r}°`, 'info', 1500, 'rotate');
-    return r;
+    const target = this.isLandscape() ? 'portrait' : 'landscape';
+    this.rotating = true;
+    this.renderOrientation();
+    let enteredFullscreen = false;
+    try {
+      // Mobile browsers commonly require fullscreen for orientation locking.
+      // Fullscreen the player container, not the video: retain all custom controls.
+      if (!document.fullscreenElement && $('#playerColumn').requestFullscreen) {
+        await $('#playerColumn').requestFullscreen({ navigationUI: 'hide' });
+        enteredFullscreen = true;
+      }
+      await orientation.lock(target);
+      this.orientationLocked = true;
+    } catch (err) {
+      // Do not strand the user in fullscreen after a rejected orientation request.
+      if (enteredFullscreen && document.fullscreenElement) {
+        try { await document.exitFullscreen(); } catch (_) { /* browser already exited */ }
+      }
+      Toast.warn('Screen rotation is unavailable here. Rotate your phone with auto-rotate enabled.');
+    } finally {
+      this.rotating = false;
+      this.renderOrientation();
+    }
   },
 
   /* Chrome is toggled by a single tap — no auto-hide, no mouse-move reveal. */
@@ -2006,7 +1998,7 @@ const Keyboard = {
         e.preventDefault();
         // Shift+R = quarter turn of the picture (three more turns bring it back);
         // plain R keeps toggling the loop mode, as it always has.
-        if (e.shiftKey) Controls.rotateBy(90);
+        if (e.shiftKey) Controls.rotateScreen();
         else Toast.show(`Loop: ${Playlist.cycleLoop()}`, 'info', 1200, 'mode');
         break;
       case 't': case 'T': e.preventDefault(); Theme.toggle(); break;
