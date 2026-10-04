@@ -132,6 +132,7 @@ check('movie search replaced the scan-site controls', $('#btnEmptySearch') !== n
   && $('#btnEmptyScan') === null && $('#btnScanSite') === null);
 check('buffering spinner is hidden on first run', $('#spinner').hidden === true);
 check('center play button is hidden until media is loaded', $('#bigPlay').hidden === true);
+check('controls start hidden so the first tap reveals them', $('#controlsBar').classList.contains('is-hidden'));
 
 console.log('\n— keyboard —');
 const key = (k, opts = {}) => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...opts }));
@@ -271,7 +272,7 @@ stage.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await wait(400);
 check('bar comes back on second click', $('#controlsBar').classList.contains('is-hidden') === barHiddenBefore);
 
-// touch double-tap
+// touch single-tap toggle and double-tap playback
 const touch = (x, y) => {
   const ev = new window.Event('touchend', { bubbles: true, cancelable: true });
   const t = { identifier: 1, clientX: x, clientY: y, target: stage };
@@ -279,6 +280,17 @@ const touch = (x, y) => {
   Object.defineProperty(ev, 'changedTouches', { value: [t] });
   stage.dispatchEvent(ev);
 };
+if (!$('#controlsBar').classList.contains('is-hidden')) {
+  stage.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await wait(400);
+}
+touch(300, 200);
+await wait(400);
+check('first single tap reveals the controls', !$('#controlsBar').classList.contains('is-hidden'));
+touch(300, 200);
+await wait(400);
+check('second single tap hides the controls again', $('#controlsBar').classList.contains('is-hidden'));
+
 const pausedBeforeTap = video.paused;
 touch(300, 200);
 await wait(400); // single-tap delay (300ms) must not change playback

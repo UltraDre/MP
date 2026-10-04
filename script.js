@@ -1680,6 +1680,9 @@ const Controls = {
     this.renderLoop();
     this.renderShuffle();
     this.renderProgress();
+
+    // Start with a clean, edge-to-edge picture; a single tap reveals the controls.
+    this.setBarVisible(false);
   },
 
   bindVideo(video) {
@@ -2122,7 +2125,7 @@ const Gestures = {
     if (!target || !(target instanceof Element)) return false;
     return !!target.closest(
       'button, a, input, select, textarea, label, output, dialog, .controls, .card, .sheet, .popup, ' +
-      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, .empty-state, video::-webkit-media-controls'
+      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, .empty-state, video[controls]'
     );
   },
 
