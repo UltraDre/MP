@@ -865,30 +865,74 @@ check('watching an item to the end clears its resume mark', !(`url:${resumeItem}
 
 console.log('\n— buffering ahead while paused —');
 const hlsConfigs = [];
+const hlsInstances = [];
 let hlsKicks = 0;
 window.Hls = class FakeHls {
   constructor(config) {
     this.config = config;
     this.handlers = {};
-    this.levels = [{}];        // as if the manifest had already been parsed
+    this.levels = [
+      { height: 720, bitrate: 2500000 },
+      { height: 1080, bitrate: 5000000 },
+      { height: 2160, bitrate: 14000000 },
+    ];
+    this.currentLevel = -1;
     hlsConfigs.push(config);
+    hlsInstances.push(this);
   }
   static isSupported() { return true; }
   on(evt, fn) { (this.handlers[evt] = this.handlers[evt] || []).push(fn); }
   once(evt, fn) { this.on(evt, fn); }
   emit(evt, data) { (this.handlers[evt] || []).slice().forEach((fn) => fn({ type: evt }, data)); }
   loadSource(url) { this.url = url; }
-  attachMedia(el) { this.media = el; setTimeout(() => this.emit('manifest_parsed', { levels: [{}, {}] }), 0); }
+  attachMedia(el) { this.media = el; setTimeout(() => this.emit('manifest_parsed', { levels: this.levels }), 0); }
   startLoad() { hlsKicks += 1; }
   destroy() {}
   get mainForwardBufferInfo() { return { len: 10, end: 12 }; }
 };
-window.Hls.Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'manifest_parsed', LEVEL_LOADED: 'level_loaded' };
+window.Hls.Events = {
+  ERROR: 'hlsError', MANIFEST_PARSED: 'manifest_parsed', LEVEL_LOADED: 'level_loaded',
+  LEVELS_UPDATED: 'levels_updated', LEVEL_SWITCHED: 'level_switched',
+};
 window.Hls.ErrorTypes = { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError' };
 
 submitUrl('https://cdn.example.com/stream/keeps-loading.m3u8');
 await wait(150);
 const hlsConfig = hlsConfigs[0] || {};
+const activeHls = hlsInstances.at(-1);
+check('quality control appears when an adaptive stream exposes renditions', $('#btnQuality').hidden === false);
+$('#btnQuality').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('quality menu lists the stream resolutions', $('#qualityMenu').hidden === false
+  && /4K \(2160p\)/.test($('#qualityGrid').textContent)
+  && /1080p/.test($('#qualityGrid').textContent)
+  && /720p/.test($('#qualityGrid').textContent), $('#qualityGrid').textContent);
+const hls720 = [...document.querySelectorAll('#qualityGrid [data-quality]')].find((button) => /720p/.test(button.textContent));
+hls720?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('choosing 720p locks hls.js to the matching rendition', activeHls?.currentLevel === 0,
+  String(activeHls?.currentLevel));
+check('quality button reflects a manual selection', $('#qualityLabel').textContent === '720p', $('#qualityLabel').textContent);
+$('#qualityGrid [data-quality="auto"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('Auto restores adaptive hls.js quality selection', activeHls?.currentLevel === -1
+  && $('#qualityLabel').textContent === 'Auto', String(activeHls?.currentLevel));
+
+console.log('\n— buffering indicator follows the playhead —');
+bufferedEnd = 40;
+video.currentTime = 10;
+video.dispatchEvent(new window.Event('stalled'));
+await wait(260);
+check('background buffering does not show dots while media is ahead of playback', $('#spinner').hidden === true);
+video.pause();
+video.dispatchEvent(new window.Event('stalled'));
+await wait(260);
+check('paused background prebuffering does not show dots', $('#spinner').hidden === true);
+video.play();
+bufferedEnd = 10.1;
+video.dispatchEvent(new window.Event('waiting'));
+await wait(260);
+check('dots appear when playback reaches the buffered edge', $('#spinner').hidden === false);
+video.dispatchEvent(new window.Event('canplay'));
+check('dots disappear when more media becomes playable', $('#spinner').hidden === true);
+
 check('an attached hls stream starts with the lean forward buffer', hlsConfig.maxBufferLength === 60,
   String(hlsConfig.maxBufferLength));
 
@@ -912,6 +956,59 @@ video.dispatchEvent(new window.Event('play'));   // stops the keep-alive timer
 await wait(300);                                 // settings writes are debounced
 check('the option is stored in settings',
   JSON.parse(window.localStorage.getItem('nebula.settings.v1')).prebufferWhilePaused === true);
+
+console.log('\n— DASH quality selection —');
+const dashPlayers = [];
+class FakeDashPlayer {
+  constructor() {
+    this.handlers = {};
+    this.levels = [
+      { qualityIndex: 0, height: 480, bitrate: 900000 },
+      { qualityIndex: 1, height: 1080, bitrate: 4500000 },
+      { qualityIndex: 2, height: 2160, bitrate: 12000000 },
+    ];
+    this.quality = 0;
+    this.auto = true;
+    dashPlayers.push(this);
+  }
+  on(event, fn) { (this.handlers[event] = this.handlers[event] || []).push(fn); }
+  emit(event, data = {}) { (this.handlers[event] || []).slice().forEach((fn) => fn(data)); }
+  updateSettings() {}
+  getBitrateInfoListFor(type) { return type === 'video' ? this.levels : []; }
+  getQualityFor(type) { return type === 'video' ? this.quality : -1; }
+  setAutoSwitchQualityFor(type, enabled) { if (type === 'video') this.auto = enabled; }
+  setQualityFor(type, quality) {
+    if (type === 'video') this.quality = quality;
+    this.emit('quality_change_rendered', { mediaType: type, newQuality: quality });
+  }
+  initialize() {
+    setTimeout(() => {
+      this.emit('manifest_loaded');
+      this.emit('stream_initialized');
+    }, 0);
+  }
+  reset() {}
+}
+const dashEvents = {
+  ERROR: 'dashError', MANIFEST_LOADED: 'manifest_loaded', STREAM_INITIALIZED: 'stream_initialized',
+  QUALITY_CHANGE_REQUESTED: 'quality_change_requested', QUALITY_CHANGE_RENDERED: 'quality_change_rendered',
+};
+const DashMediaPlayer = () => ({ create: () => new FakeDashPlayer() });
+DashMediaPlayer.events = dashEvents;
+window.dashjs = { MediaPlayer: DashMediaPlayer };
+submitUrl('https://cdn.example.com/stream/quality-test.mpd');
+await wait(150);
+const activeDash = dashPlayers.at(-1);
+check('DASH renditions populate the shared quality menu', $('#btnQuality').hidden === false
+  && /1080p/.test($('#qualityGrid').textContent) && /4K \(2160p\)/.test($('#qualityGrid').textContent),
+  $('#qualityGrid').textContent);
+$('#btnQuality').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+const dash1080 = [...document.querySelectorAll('#qualityGrid [data-quality]')].find((button) => /1080p/.test(button.textContent));
+dash1080?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('choosing a DASH resolution disables auto and selects that representation',
+  activeDash?.auto === false && activeDash?.quality === 1, JSON.stringify({ auto: activeDash?.auto, quality: activeDash?.quality }));
+$('#qualityGrid [data-quality="auto"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+check('Auto re-enables DASH adaptive quality', activeDash?.auto === true && $('#qualityLabel').textContent === 'Auto');
 
 console.log('\n— playlist sorting —');
 const rows = () => [...document.querySelectorAll('#playlistList .item')];

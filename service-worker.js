@@ -23,7 +23,7 @@
 /* ---------------------------------------------------------------------
  * Configuration
  * ------------------------------------------------------------------ */
-const VERSION = '1.0.8';
+const VERSION = '1.0.9';
 // Keep offline downloads and their index across shell-only releases. Bump this
 // separately only when the stored media/index format becomes incompatible.
 const DATA_VERSION = '1.0.6';

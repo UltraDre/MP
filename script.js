@@ -564,6 +564,7 @@ const StreamEngine = {
   destroy() {
     this._stopKeepAlive();
     this.media = null;
+    VideoQuality.reset();
     if (this.hls) {
       try { this.hls.destroy(); } catch (err) { console.warn(err); }
       this.hls = null;
@@ -633,6 +634,7 @@ const StreamEngine = {
       },
     });
     this.hls = hls;
+    VideoQuality.bindHls(hls);
     // Extend (or trim) the forward-buffer targets to match the current state.
     this.applyBufferPolicy();
 
@@ -689,6 +691,7 @@ const StreamEngine = {
 
     const player = window.dashjs.MediaPlayer().create();
     this.dash = player;
+    VideoQuality.bindDash(player);
     player.updateSettings({
       streaming: {
         buffer: {
@@ -717,6 +720,237 @@ const StreamEngine = {
     // Extend (or trim) the forward-buffer targets to match the current state.
     this.applyBufferPolicy();
     return { ok: true, mode: 'dash', dash: player };
+  },
+};
+
+/* =====================================================================
+ * ADAPTIVE VIDEO QUALITY — HLS/DASH rendition selector
+ * ===================================================================*/
+
+const VideoQuality = {
+  mode: '',
+  stream: null,
+  items: [],
+  choice: 'auto',
+  actualIndex: -1,
+
+  init() { this.reset(); },
+
+  reset() {
+    this.mode = '';
+    this.stream = null;
+    this.items = [];
+    this.choice = 'auto';
+    this.actualIndex = -1;
+    this.render();
+  },
+
+  formatBitrate(value) {
+    const bitrate = Number(value);
+    if (!Number.isFinite(bitrate) || bitrate <= 0) return '';
+    const mbps = bitrate / 1_000_000;
+    return `${mbps >= 10 ? mbps.toFixed(0) : mbps.toFixed(1)} Mbps`;
+  },
+
+  resolutionLabel(height, name = '') {
+    const parsedHeight = Number(height);
+    if (Number.isFinite(parsedHeight) && parsedHeight >= 200) {
+      const h = Math.round(parsedHeight);
+      if (h >= 4320) return `8K (${h}p)`;
+      if (h >= 2160) return `4K (${h}p)`;
+      return `${h}p`;
+    }
+
+    const raw = String(name || '').trim();
+    if (/\b8k\b/i.test(raw)) return '8K';
+    if (/\b4k\b/i.test(raw)) return '4K';
+    const match = raw.match(/\b(\d{3,4})p?\b/i);
+    if (match) {
+      const h = Number(match[1]);
+      if (h >= 4320) return `8K (${h}p)`;
+      return h >= 2160 ? `4K (${h}p)` : `${h}p`;
+    }
+    return raw;
+  },
+
+  buildItems(levels, indexFor) {
+    const source = Array.isArray(levels) ? levels : [];
+    const items = source.map((level, position) => {
+      const value = level || {};
+      const index = indexFor(value, position);
+      const height = Number(value.height) || Number(value.resolution?.height) || 0;
+      const bitrate = Number(value.bitrate) || Number(value.bandwidth) || Number(value.avgBitrate) || 0;
+      const resolution = this.resolutionLabel(height, value.name || value.label || '');
+      const fallback = this.formatBitrate(bitrate);
+      const shortLabel = resolution || fallback || `Level ${position + 1}`;
+      return {
+        id: String(index),
+        index,
+        height: Number.isFinite(height) ? height : 0,
+        bitrate: Number.isFinite(bitrate) ? bitrate : 0,
+        shortLabel,
+        label: shortLabel,
+      };
+    });
+
+    const counts = new Map();
+    items.forEach((item) => counts.set(item.shortLabel, (counts.get(item.shortLabel) || 0) + 1));
+    items.forEach((item, position) => {
+      if (counts.get(item.shortLabel) > 1) {
+        item.label = `${item.shortLabel} · ${this.formatBitrate(item.bitrate) || `Level ${position + 1}`}`;
+      }
+    });
+    return items.sort((a, b) => (b.height - a.height) || (b.bitrate - a.bitrate) || (a.index - b.index));
+  },
+
+  bindHls(hls) {
+    this.reset();
+    this.mode = 'hls';
+    this.stream = hls;
+    this.updateHls();
+
+    const events = window.Hls?.Events || {};
+    const listen = (key, fn) => {
+      const event = events[key];
+      if (event && typeof hls.on === 'function') hls.on(event, fn);
+    };
+    listen('MANIFEST_PARSED', () => this.updateHls());
+    listen('LEVELS_UPDATED', () => this.updateHls());
+    listen('LEVEL_SWITCHED', () => this.updateHls());
+  },
+
+  updateHls() {
+    if (this.mode !== 'hls' || !this.stream) return;
+    const levels = Array.isArray(this.stream.levels) ? this.stream.levels : [];
+    this.items = this.buildItems(levels, (_level, index) => index);
+    const current = Number(this.stream.currentLevel);
+    this.actualIndex = Number.isInteger(current) ? current : -1;
+    if (this.choice !== 'auto' && !this.items.some((item) => item.id === this.choice)) this.choice = 'auto';
+    this.render();
+  },
+
+  bindDash(player) {
+    this.reset();
+    this.mode = 'dash';
+    this.stream = player;
+    this.updateDash();
+
+    const events = window.dashjs?.MediaPlayer?.events || {};
+    const listen = (key, fn) => {
+      const event = events[key];
+      if (event && typeof player.on === 'function') player.on(event, fn);
+    };
+    listen('MANIFEST_LOADED', () => this.updateDash());
+    listen('STREAM_INITIALIZED', () => this.updateDash());
+    listen('QUALITY_CHANGE_REQUESTED', (event) => {
+      if (!event?.mediaType || event.mediaType === 'video') this.updateDash();
+    });
+    listen('QUALITY_CHANGE_RENDERED', (event) => {
+      if (!event?.mediaType || event.mediaType === 'video') this.updateDash();
+    });
+  },
+
+  updateDash() {
+    if (this.mode !== 'dash' || !this.stream) return;
+    let levels = [];
+    let current = -1;
+    try { levels = this.stream.getBitrateInfoListFor?.('video') || []; } catch { /* not ready yet */ }
+    try { current = Number(this.stream.getQualityFor?.('video')); } catch { /* not ready yet */ }
+    this.items = this.buildItems(levels, (level, index) => {
+      const qualityIndex = Number(level?.qualityIndex);
+      return Number.isInteger(qualityIndex) && qualityIndex >= 0 ? qualityIndex : index;
+    });
+    this.actualIndex = Number.isInteger(current) ? current : -1;
+    if (this.choice !== 'auto' && !this.items.some((item) => item.id === this.choice)) this.choice = 'auto';
+    this.render();
+  },
+
+  actualLabel() {
+    const active = this.items.find((item) => item.index === this.actualIndex);
+    return active?.shortLabel || '';
+  },
+
+  select(id) {
+    if (!this.stream) return;
+    try {
+      if (id === 'auto') {
+        if (this.mode === 'hls') this.stream.currentLevel = -1;
+        else if (this.mode === 'dash') this.stream.setAutoSwitchQualityFor?.('video', true);
+        this.choice = 'auto';
+      } else {
+        const item = this.items.find((entry) => entry.id === String(id));
+        if (!item) return;
+        if (this.mode === 'hls') this.stream.currentLevel = item.index;
+        else if (this.mode === 'dash') {
+          this.stream.setAutoSwitchQualityFor?.('video', false);
+          this.stream.setQualityFor('video', item.index, true);
+        }
+        this.choice = item.id;
+      }
+      if (this.mode === 'hls') {
+        const current = Number(this.stream.currentLevel);
+        this.actualIndex = Number.isInteger(current) ? current : -1;
+      } else if (this.mode === 'dash') {
+        const current = Number(this.stream.getQualityFor?.('video'));
+        this.actualIndex = Number.isInteger(current) ? current : -1;
+      }
+      this.render();
+    } catch (error) {
+      console.warn('[quality] could not change rendition', error);
+      Toast.warn('This stream could not switch to that quality.');
+    }
+  },
+
+  render() {
+    const button = $('#btnQuality');
+    const menu = $('#qualityMenu');
+    const label = $('#qualityLabel');
+    const status = $('#qualityStatus');
+    const grid = $('#qualityGrid');
+    if (!button || !menu || !label || !status || !grid) return;
+
+    const available = (this.mode === 'hls' || this.mode === 'dash') && this.items.length > 0;
+    button.hidden = !available;
+    if (!available) {
+      menu.hidden = true;
+      button.setAttribute('aria-expanded', 'false');
+      grid.replaceChildren();
+      grid.dataset.signature = '';
+      return;
+    }
+
+    const selected = this.items.find((item) => item.id === this.choice);
+    const selectedLabel = this.choice === 'auto' ? 'Auto' : (selected?.shortLabel || 'Auto');
+    const activeLabel = this.actualLabel();
+    label.textContent = selectedLabel;
+    button.setAttribute('aria-label', `Video quality: ${selectedLabel}`);
+    button.title = this.choice === 'auto' && activeLabel
+      ? `Video quality — Auto (currently ${activeLabel})`
+      : `Video quality — ${selectedLabel}`;
+    status.textContent = this.choice === 'auto'
+      ? (activeLabel ? `Auto · currently ${activeLabel}` : 'Auto selects the best available stream quality')
+      : `Fixed at ${selected?.shortLabel || selectedLabel}`;
+
+    const signature = this.items.map((item) => `${item.id}:${item.label}`).join('|');
+    if (grid.dataset.signature !== signature) {
+      const auto = el('button', {
+        type: 'button', role: 'menuitemradio', 'data-quality': 'auto',
+        onclick: () => this.select('auto'),
+      }, el('span', { text: 'Auto' }), el('small', { text: '' }));
+      const options = this.items.map((item) => el('button', {
+        type: 'button', role: 'menuitemradio', 'data-quality': item.id,
+        onclick: () => this.select(item.id),
+      }, el('span', { text: item.label })));
+      grid.replaceChildren(auto, ...options);
+      grid.dataset.signature = signature;
+    }
+
+    const autoButton = grid.querySelector('[data-quality="auto"]');
+    const autoDetail = autoButton?.querySelector('small');
+    if (autoDetail) autoDetail.textContent = activeLabel ? `Current: ${activeLabel}` : 'Adaptive';
+    $$('#qualityGrid [data-quality]').forEach((option) => {
+      option.setAttribute('aria-checked', String(option.dataset.quality === this.choice));
+    });
   },
 };
 
@@ -898,7 +1132,7 @@ const Player = {
     video.addEventListener('durationchange', onActive(() => { Controls.renderProgress(); Controls.renderDuration(); }));
     video.addEventListener('volumechange', onActive(() => Controls.renderVolume()));
     video.addEventListener('ratechange', onActive(() => Controls.renderSpeed()));
-    video.addEventListener('seeking', onActive(() => { if (video.readyState < 3) this.showSpinner(); }));
+    video.addEventListener('seeking', onActive(() => { if (video.readyState < 3) this.showSpinner({ allowPaused: true }); }));
     video.addEventListener('seeked', onActive(() => { this.hideSpinner(); this._resumePending = false; this.rememberPosition(); }));
     video.addEventListener('waiting', onActive(() => this.showSpinner()));
     video.addEventListener('stalled', onActive(() => this.showSpinner()));
@@ -1209,15 +1443,50 @@ const Player = {
     this.video.currentTime = clamp(this.video.currentTime + (forward ? 1 : -1) / fps, 0, this.video.duration || 0);
   },
 
-  showSpinner() {
-    // Never show the buffering dots unless we actually have a source in flight.
+  /** Seconds of contiguous media buffered ahead of the current playhead. */
+  bufferedAhead() {
+    const video = this.video;
+    if (!video) return 0;
+    const time = Number(video.currentTime) || 0;
+    try {
+      const ranges = video.buffered;
+      if (!ranges) return 0;
+      for (let i = 0; i < ranges.length; i++) {
+        const start = Number(ranges.start(i));
+        const end = Number(ranges.end(i));
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        // Only count the buffered range that contains the playhead. A later,
+        // disjoint range cannot prevent a stall at the current playback point.
+        if (time >= start - 0.08 && time <= end + 0.35) return Math.max(0, end - time);
+        if (time < start - 0.35) return 0;
+      }
+    } catch { /* buffered can throw on some browsers */ }
+    return 0;
+  },
+
+  /** The spinner is for playback starvation, not for normal background downloads. */
+  isAtBufferEdge() {
+    const video = this.video;
+    if (!video || this.bufferedAhead() > 0.35) return false;
+    const readyState = Number(video.readyState);
+    return !Number.isFinite(readyState) || readyState < 3; // HAVE_FUTURE_DATA
+  },
+
+  showSpinner({ allowPaused = false } = {}) {
+    // Ignore background fetch / stalled notifications while paused or while the
+    // playhead still has media ahead of it. A load or explicit seek may show it
+    // while paused; ordinary prebuffer activity may not.
     if (!this.current) return;
     const v = this.video;
-    if (!v) return;
-    if (!v.src && !v.currentSrc && !StreamEngine.hls && !StreamEngine.dash) return;
+    if (!v || (!v.src && !v.currentSrc && !StreamEngine.hls && !StreamEngine.dash)) return;
+    if ((v.paused && !allowPaused) || !this.isAtBufferEdge()) { this.hideSpinner(); return; }
     clearTimeout(this._spinnerTimer);
     this._spinnerTimer = setTimeout(() => {
-      if (!this.current) return;
+      this._spinnerTimer = null;
+      if (!this.current || (v.paused && !allowPaused) || !this.isAtBufferEdge()) {
+        this.hideSpinner();
+        return;
+      }
       const node = $('#spinner');
       if (node) { node.hidden = false; node.setAttribute('aria-hidden', 'false'); }
     }, 220);
@@ -1322,7 +1591,7 @@ const Player = {
     const loadGen = this._loadGen;
     this.current = item;
     this._volumeWarningKey = null;
-    this.showSpinner();
+    this.showSpinner({ allowPaused: true });
     Playlist.markCurrent(item.id);
     UI.renderCurrentTitle(item);
     MediaSession.setMetadata(item);
@@ -1594,6 +1863,7 @@ const Controls = {
     /* --- shuffle / loop / speed / captions / pip / fullscreen --- */
     $('#btnShuffle').addEventListener('click', () => Playlist.toggleShuffle());
     $('#btnLoop').addEventListener('click', () => Playlist.cycleLoop());
+    $('#btnQuality')?.addEventListener('click', (e) => { e.stopPropagation(); Menus.toggle('quality', $('#btnQuality')); });
     $('#btnSpeed').addEventListener('click', (e) => { e.stopPropagation(); Menus.toggle('speed', $('#btnSpeed')); });
     $('#btnCaptions').addEventListener('click', (e) => { e.stopPropagation(); Menus.toggle('subtitles', $('#btnCaptions')); });
     $('#btnPip').addEventListener('click', () => this.togglePip());
@@ -1876,7 +2146,7 @@ const Menus = {
     document.addEventListener('click', (e) => {
       if (!this.open) return;
       const target = e.target instanceof Element ? e.target : null;
-      if (target && (this.open.contains(target) || target.closest('#btnSpeed, #btnCaptions'))) return;
+      if (target && (this.open.contains(target) || target.closest('#btnSpeed, #btnQuality, #btnCaptions'))) return;
       this.close();
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.open) this.close(); });
@@ -1885,13 +2155,14 @@ const Menus = {
   },
 
   toggle(which, anchor) {
-    if (which === 'speed') {
-      const node = $('#speedMenu');
+    if (which === 'speed' || which === 'quality') {
+      const node = which === 'quality' ? $('#qualityMenu') : $('#speedMenu');
+      const button = anchor || (which === 'quality' ? $('#btnQuality') : $('#btnSpeed'));
       const isOpen = !node.hidden;
       this.close();
       if (!isOpen) {
         node.hidden = false;
-        $('#btnSpeed').setAttribute('aria-expanded', 'true');
+        button.setAttribute('aria-expanded', 'true');
         this.open = node;
         node.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       }
@@ -1904,8 +2175,10 @@ const Menus = {
     if (!this.open) return;
     // The subtitle sheet has its own close routine (keeps aria-expanded in sync).
     if (this.open === $('#subtitleSheet')) { Subtitles.closeSheet(); return; }
-    this.open.hidden = true;
-    $('#btnSpeed').setAttribute('aria-expanded', 'false');
+    const active = this.open;
+    active.hidden = true;
+    const button = active.id === 'qualityMenu' ? $('#btnQuality') : $('#btnSpeed');
+    button?.setAttribute('aria-expanded', 'false');
     this.open = null;
   },
 };
@@ -6390,6 +6663,7 @@ const App = {
 
     Player.init();
     Controls.init();
+    VideoQuality.init();
     Menus.init();
     Subtitles.init();
     SubtitleSearch.init();
