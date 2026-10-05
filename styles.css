@@ -863,6 +863,18 @@ input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 5px var(
 }
 .speed-grid button:hover { background: var(--surface-3); }
 .speed-grid button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: transparent; }
+.quality-status { margin: -2px 0 8px; font-size: .78rem; color: var(--text-dim); }
+.quality-list { display: grid; gap: 5px; max-height: min(48dvh, 360px); overflow: auto; }
+.quality-list button {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface-2); font-size: .84rem; font-weight: 600; text-align: left; cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.quality-list button:hover { background: var(--surface-3); }
+.quality-list button[aria-checked="true"] { background: var(--accent); color: #fff; border-color: transparent; }
+.quality-list button small { color: var(--text-mute); font-size: .72rem; font-weight: 500; white-space: nowrap; }
+.quality-list button[aria-checked="true"] small { color: rgba(255, 255, 255, .82); }
 
 .sidebar-hint-mobile { display: none !important; }
 .sidebar-hint-mobile svg { width: 16px; height: 16px; }

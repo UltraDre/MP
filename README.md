@@ -48,9 +48,14 @@ No frameworks, no build step, no bundler — open it from any static server and 
   keeps filling ahead (up to the browser/SourceBuffer quota and the host's limits), and hls.js is nudged
   if it stops growing. The *Keep downloading ahead while paused* switch in the shortcut dialog can turn
   the background data usage off.
+- **Video quality** control for adaptive HLS (hls.js) and DASH streams: choose *Auto* or a rendition
+  advertised by the manifest (such as 4K / 2160p, 1080p or 720p). It is shown only when the stream exposes
+  quality levels. Single-file MP4/WebM and native-HLS playback do not provide a switchable rendition list.
 - Media Session integration (lock-screen / hardware media keys where supported).
-- Loading spinner, friendly error cards with retry, and **resume positions**: every item remembers where
-  you stopped and re-opens there (a title you watched to the end starts over). Marks are keyed by the
+- The **buffering dots appear only when the playhead reaches the end of its contiguous buffered range**;
+  downloading further ahead in the background does not trigger the spinner.
+- Friendly error cards with retry and **resume positions**: every item remembers where you stopped and
+  re-opens there (a title you watched to the end starts over). Marks are keyed by the
   media URL in `localStorage`, so they survive reloads, playlist re-imports and switching between the
   streaming and downloaded copy of the same video; local files are keyed by name + size + modified date,
   so they survive a restart as well and are still there once the file is reconnected.
@@ -184,10 +189,10 @@ The file is split into numbered sections so you can jump straight to what you ne
 | § | Section | Responsibility |
 |---|---------|----------------|
 | 01–04 | Utilities, Settings, Toasts, Media helpers | formatting, localStorage (+ `flushPersisted()`), dialogs, format detection |
-| 05 | `StreamEngine` | loads hls.js/dash.js on demand and attaches streams |
+| 05 | `StreamEngine` | loads hls.js/dash.js on demand, attaches streams and exposes adaptive quality levels |
 | 06 | `Player` + `Resume` | the core playback controller (`load()`, seeking, volume, errors) and the persistent resume-position store |
 | 07 | `MediaSession` | OS media keys / lock-screen metadata |
-| 08–09 | `Controls`, `Menus` | control bar binding (incl. screen rotation), speed menu, popups |
+| 08–09 | `Controls`, `Menus` | control bar binding (incl. screen rotation), speed/quality menus and popups |
 | 10–11 | `Gestures`, `Keyboard` | double-tap/double-click gestures & shortcuts |
 | 12 | `Playlist` | queue, reordering, alphabetical sort, persistence, reconnecting saved local files, import/export |
 | 13 | `Offline` | talking to the service worker, downloads UI |
