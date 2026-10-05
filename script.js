@@ -2114,6 +2114,8 @@ const Controls = {
   setBarVisible(visible) {
     $('#controlsBar').classList.toggle('is-hidden', !visible);
     document.body.classList.toggle('controls-hidden', !visible);
+    // Never strand a popup on screen after its anchor button is hidden.
+    if (!visible) Menus.close();
     clearTimeout(this.hideTimer);
   },
   toggleBar() { this.setBarVisible($('#controlsBar').classList.contains('is-hidden')); },
@@ -2125,6 +2127,7 @@ const Controls = {
 
 const Menus = {
   open: null,
+  lastDismiss: 0,
 
   init() {
     /* Speed buttons */
@@ -2133,7 +2136,7 @@ const Menus = {
     speeds.forEach((s) => {
       grid.append(el('button', {
         type: 'button', text: `${s}×`, 'data-speed': s, 'aria-pressed': 'false',
-        onclick: () => { Player.setSpeed(s); },
+        onclick: () => { Player.setSpeed(s); this.close(); },
       }));
     });
     $('#preservePitch').addEventListener('change', (e) => {
@@ -2142,13 +2145,23 @@ const Menus = {
       Toast.show(e.target.checked ? 'Pitch preserved' : 'Pitch changes with speed', 'info', 1500);
     });
 
-    /* Close menus on outside click / Escape */
-    document.addEventListener('click', (e) => {
+    /* Close menus on outside press / Escape.
+     * `pointerdown` (not `click`) is essential on touch devices: the player
+     * stage calls preventDefault() on touchstart, which suppresses the
+     * synthesised click — a click-only listener would leave the popup
+     * impossible to dismiss by tapping outside it. `click` is kept as a
+     * fallback for browsers without pointer events. */
+    const dismissOutside = (e) => {
       if (!this.open) return;
       const target = e.target instanceof Element ? e.target : null;
       if (target && (this.open.contains(target) || target.closest('#btnSpeed, #btnQuality, #btnCaptions'))) return;
       this.close();
-    });
+      // Let Gestures know this press was consumed by dismissing a menu, so
+      // the same tap doesn't also toggle the control bar.
+      this.lastDismiss = performance.now();
+    };
+    document.addEventListener('pointerdown', dismissOutside);
+    document.addEventListener('click', dismissOutside);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && this.open) this.close(); });
 
     /* Subtitle sheet wiring lives in Subtitles.init() */
@@ -2430,6 +2443,9 @@ const Gestures = {
 
   /** Single tap toggles the control bar visibility. */
   handleSingleTap() {
+    // A tap that dismissed an open popup (speed/quality menu) is consumed —
+    // it must not also toggle the control bar.
+    if (performance.now() - Menus.lastDismiss < 700) return;
     const hidden = $('#controlsBar').classList.contains('is-hidden');
     Controls.setBarVisible(hidden);
     if (!hidden) clearTimeout(Controls.hideTimer);
