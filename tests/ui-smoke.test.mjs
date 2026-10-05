@@ -134,6 +134,27 @@ check('buffering spinner is hidden on first run', $('#spinner').hidden === true)
 check('center play button is hidden until media is loaded', $('#bigPlay').hidden === true);
 check('controls start hidden so the first tap reveals them', $('#controlsBar').classList.contains('is-hidden'));
 
+console.log('\n— controls without media —');
+check('the no-media state is active', document.body.classList.contains('is-empty'));
+const emptyState = $('#emptyState');
+const emptyStateTap = () => {
+  const point = { identifier: 1, clientX: 300, clientY: 200, target: emptyState };
+  const dispatch = (type) => {
+    const event = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'touches', { value: type === 'touchend' ? [] : [point] });
+    Object.defineProperty(event, 'changedTouches', { value: [point] });
+    emptyState.dispatchEvent(event);
+  };
+  dispatch('touchstart');
+  dispatch('touchend');
+};
+emptyStateTap();
+await wait(400);
+check('tapping the no-media screen reveals playback controls', !$('#controlsBar').classList.contains('is-hidden'));
+emptyStateTap();
+await wait(400);
+check('tapping the no-media screen again hides playback controls', $('#controlsBar').classList.contains('is-hidden'));
+
 console.log('\n— keyboard —');
 const key = (k, opts = {}) => document.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...opts }));
 const video = $('#video');

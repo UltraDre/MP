@@ -1324,7 +1324,6 @@ body {
   background: rgba(255, 255, 255, .06);
 }
 .empty-hint { max-width: 65ch; color: #9297a2; font-size: .74rem; }
-body.is-empty .controls { display: none; }
 
 .big-play {
   width: 68px;
@@ -1336,6 +1335,7 @@ body.is-empty .controls { display: none; }
 }
 .big-play:hover { background: var(--accent); }
 
+/* Keep the bar available before media loads; .is-hidden still controls its visibility. */
 .controls {
   position: absolute;
   left: 0;

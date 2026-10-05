@@ -38,8 +38,9 @@ No frameworks, no build step, no bundler — open it from any static server and 
   playback speed (0.25×–3×, pitch preserved), loop (off / all / one) and shuffle.
 - **Edge-to-edge picture with overlaid controls**: the video fills the whole window, and the control
   bar floats on top of it. The app starts with the controls hidden for a clean picture — **tap / click
-  the video once** to bring them up, and tap again to hide them. The title bar and the playlist toggle
-  follow the same show/hide so nothing shrinks or obscures the media.
+  the player area—even when the no-media screen is showing—** to bring them up, and tap again to hide
+  them. The title bar and the playlist toggle follow the same show/hide so nothing shrinks or obscures
+  the media.
 - **Rotate the screen** with the ↻ button or <kbd>Shift</kbd>+<kbd>R</kbd>: switch between portrait
   and landscape with the video, controls and overlays together (supported mobile browsers).
 - Online progressive, HLS and DASH sources request ahead buffering to help reduce stalls. **Pausing does
