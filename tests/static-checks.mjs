@@ -56,7 +56,12 @@ if (/position:\s*absolute/.test(controlsRule) && /bottom:\s*0/.test(controlsRule
   ok('controls overlay the full-width media stage');
 } else fail('controls are not overlaid on the media stage');
 
-/* 6. Paren nesting sanity, with a real scanner (strings/templates/regex/comments) */
+/* 6. Tapping the no-media overlay can still reveal the control bar. */
+if (/body\.is-empty\s+\.controls\s*\{[^}]*display\s*:\s*none/i.test(css)) {
+  fail('the no-media state hides the controls bar');
+} else ok('the no-media state leaves control-bar visibility to the tap toggle');
+
+/* 7. Paren nesting sanity, with a real scanner (strings/templates/regex/comments) */
 function scanDepth(src) {
   const REGEX_OK = /[=(,:;[!&|?{+\-*%<>~^]|^$/;
   let depth = 0, minDepth = 0, i = 0;
@@ -98,12 +103,12 @@ for (const [name, src] of [['script.js', js], ['service-worker.js', sw]]) {
   else ok(`${name}: paren nesting is sane`);
 }
 
-/* 7. Service worker must not reference undefined top-level identifiers */
+/* 8. Service worker must not reference undefined top-level identifiers */
 const swHandlers = ['install', 'activate', 'fetch', 'message'].filter((h) => sw.includes(`addEventListener('${h}'`));
 if (swHandlers.length === 4) ok('service worker registers install/activate/fetch/message');
 else fail('service worker handlers: ' + swHandlers.join(', '));
 
-/* 8. Manifest sanity */
+/* 9. Manifest sanity */
 const manifest = JSON.parse(fs.readFileSync(`${root}/manifest.json`, 'utf8'));
 for (const key of ['name', 'short_name', 'start_url', 'display', 'icons', 'scope']) {
   if (!manifest[key]) fail('manifest missing ' + key);
@@ -113,7 +118,7 @@ const missingIconsFiles = iconFiles.filter((f) => !fs.existsSync(`${root}/${f}`)
 if (missingIconsFiles.length) fail('manifest icons missing on disk: ' + missingIconsFiles.join(', '));
 else ok('manifest complete, icons present');
 
-/* 9. Files referenced by index.html must exist */
+/* 10. Files referenced by index.html must exist */
 const srcs = [...html.matchAll(/(?:src|href)="((?!https?:|#|data:)[^"]+)"/g)].map((m) => m[1]);
 const missingFiles = [...new Set(srcs)].filter((s) => !fs.existsSync(`${root}/${s}`));
 if (missingFiles.length) fail('missing local files: ' + missingFiles.join(', '));

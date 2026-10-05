@@ -2123,9 +2123,11 @@ const Gestures = {
   /** True when the event target is part of the interactive UI (never gesture). */
   isInteractive(target) {
     if (!target || !(target instanceof Element)) return false;
+    // The no-media card is an overlay, but its non-button surface should still
+    // count as the player stage so a tap can reveal or hide the controls.
     return !!target.closest(
       'button, a, input, select, textarea, label, output, dialog, .controls, .card, .sheet, .popup, ' +
-      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, .empty-state, video[controls]'
+      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, video[controls]'
     );
   },
 
