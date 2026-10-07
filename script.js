@@ -14,7 +14,7 @@
  *   03 UI helpers         09 Menus       | 10 Gestures
  *   04 Media helpers      11 Keyboard    | 12 Playlist
  *   05 StreamEngine       13 Offline     | 14 Subtitles
- *   06 Player + Resume    15 SubtitleSearch
+ *   06 Player + Resume    15 SubtitleSearch | 12b UpNext (card before the end)
  *   16 Sources + MovieSearch | 17 Theme | 18 Shell | 19 UI | 20 Boot
  * ===================================================================== */
 
@@ -227,6 +227,8 @@ const Settings = {
     subtitlePosition: 8,    // vertical offset above the bottom edge, in percent
     seekZones: false,       // double-tap left/right third = ±10s (opt-in)
     prebufferWhilePaused: true, // keep downloading ahead while playback is paused
+    upNextEnabled: true,    // offer the "up next" card before the current item ends
+    upNextSeconds: 60,      // how many seconds before the end the card appears
     movieSearchSource: 'all',   // movie search catalogue: 'all' | provider id
     animeSearchSource: 'all',   // anime search catalogue: 'all' | provider id
     lastVolume: 1,
@@ -1079,6 +1081,8 @@ const Player = {
   _spinnerTimer: null,
   _errorRetry: null,
   _hasPlayed: false,
+  _speedOverride: null,  // rate forced by a held press (never persisted)
+  _speedRestore: null,   // the user's rate, put back when the press ends
   _loadGen: 0,
   _loading: false,      // a load() is in flight (ignore stray pause/seek events)
   _resumePending: false,// the stored position has not been applied yet
@@ -1145,12 +1149,46 @@ const Player = {
 
   setSpeed(rate, { silent = false } = {}) {
     const r = clamp(rate, 0.25, 4);
-    this.video.playbackRate = r;
-    this.video.defaultPlaybackRate = r;
     Settings.set('speed', r);
+    if (this._speedOverride !== null) {
+      // A hold-to-fast-forward is in progress: remember the choice and apply it
+      // the moment the press is released, instead of fighting the override.
+      this._speedRestore = r;
+    } else {
+      this.video.playbackRate = r;
+      this.video.defaultPlaybackRate = r;
+    }
     Controls.renderSpeed();
     if (!silent) Toast.show(`${r}× speed`, 'info', 1400, 'speed');
     return r;
+  },
+
+  /**
+   * Force a playback rate for as long as a gesture is held (press-and-hold
+   * fast-forward). Deliberately *not* written to Settings: the user's chosen
+   * speed is restored by `clearSpeedOverride()` on release.
+   */
+  setSpeedOverride(rate) {
+    const v = this.video;
+    if (!v) return;
+    if (this._speedOverride === null) {
+      this._speedRestore = Number.isFinite(v.playbackRate) && v.playbackRate > 0
+        ? v.playbackRate
+        : (Settings.get('speed') || 1);
+    }
+    this._speedOverride = clamp(rate, 0.25, 4);
+    try { v.playbackRate = this._speedOverride; } catch { /* unsupported */ }
+    Controls.renderSpeed();
+  },
+
+  /** Drop a forced rate and go back to the speed the user actually picked. */
+  clearSpeedOverride() {
+    if (this._speedOverride === null) return;
+    this._speedOverride = null;
+    const restore = Number.isFinite(this._speedRestore) && this._speedRestore > 0 ? this._speedRestore : 1;
+    this._speedRestore = null;
+    try { this.video.playbackRate = restore; } catch { /* unsupported */ }
+    Controls.renderSpeed();
   },
 
   /** Whether a video URL is safe to route through Web Audio without CORS muting it. */
@@ -1383,6 +1421,7 @@ const Player = {
     this.bindVideoEvents(replacement);
     Controls.bindVideo(replacement);
     Subtitles.bindVideo(replacement);
+    UpNext.bindVideo(replacement);
     Controls.renderProgress();
     Controls.renderDuration();
     Controls.renderVolume();
@@ -1505,6 +1544,8 @@ const Player = {
   },
   showEmptyState() {
     this.hideSpinner();
+    Gestures.cancelHold();
+    UpNext.reset();
     $('#emptyState').hidden = false;
     document.body.classList.add('is-empty');
     UI.renderResumePrompt();
@@ -1583,6 +1624,10 @@ const Player = {
 
     this.rememberPosition();
     this._loading = true;
+    // A held press and the up-next card both belong to the item that is going
+    // away — release the fast-forward and drop the card before swapping sources.
+    Gestures.cancelHold();
+    UpNext.reset();
     StreamEngine.destroy();
     this.setError(null);
     this.hideEmptyState();
@@ -2205,6 +2250,9 @@ const Gestures = {
   MOVE_TOLERANCE: 60,      // px — a "tap" must not move much
   SWIPE_THRESHOLD: 36,     // px — lock to seek/volume after deliberate movement
   SEEK_SECONDS_PER_PIXEL: 0.1,
+  HOLD_DELAY: 320,         // ms — how long a press must be held to engage fast-forward
+  HOLD_SPEED: 2,           // playback rate while the press is held
+  HOLD_SLOP: 14,           // px — a press that drifts this far is a drag, not a hold
   lastTouchEnd: 0,
   lastTap: { time: 0, x: 0, y: 0 },
   singleTapTimer: null,
@@ -2212,6 +2260,8 @@ const Gestures = {
   touchStart: null,
   touchGesture: null,
   ignoreTouchEnd: false,
+  hold: null,              // { id, x, y, active, timer } — press-and-hold fast-forward
+  holdConsumedAt: 0,       // a finished hold must not also toggle the chrome
 
   init() {
     const stage = $('#playerStage');
@@ -2221,6 +2271,15 @@ const Gestures = {
     stage.addEventListener('touchmove', (e) => this.handleTouchMove(e), { passive: false });
     stage.addEventListener('touchend', (e) => this.handleTouchEnd(e), { passive: true });
     stage.addEventListener('touchcancel', () => this.cancelTouchGesture(), { passive: true });
+
+    /* ---------- Press and hold = 2× speed (pointer events cover mouse + touch) ---------- */
+    stage.addEventListener('pointerdown', (e) => this.handlePointerDown(e));
+    stage.addEventListener('pointermove', (e) => this.handlePointerMove(e));
+    stage.addEventListener('pointerup', (e) => this.handlePointerUp(e));
+    stage.addEventListener('pointercancel', () => this.cancelHold());
+    // A long press must not summon the native context menu on top of the HUD.
+    stage.addEventListener('contextmenu', (e) => { if (this.isHolding()) e.preventDefault(); });
+    window.addEventListener('blur', () => this.cancelHold());
 
     /* ---------- Mouse (desktop) ---------- */
     stage.addEventListener('dblclick', (e) => {
@@ -2247,11 +2306,72 @@ const Gestures = {
     DragDrop.bindStage(stage);
   },
 
+  /* ---------- press-and-hold fast-forward ---------- */
+
+  /** A hold only makes sense with a seekable item that is actually playing. */
+  canHold() {
+    const v = Player.video;
+    if (!v || v.paused || v.ended || !Player.hasMediaSource()) return false;
+    return Number.isFinite(v.duration) && v.duration > 0;   // live streams cannot be rushed
+  },
+
+  isHolding() { return !!(this.hold && this.hold.active); },
+
+  handlePointerDown(e) {
+    if (this.hold) this.cancelHold();
+    // Right / middle clicks, multi-touch pinches and the on-video chrome are
+    // somebody else's business.
+    if (this.ignoreTouchEnd) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (this.isInteractive(e.target)) return;
+    this.hold = { id: e.pointerId, x: e.clientX, y: e.clientY, active: false, timer: null };
+    this.hold.timer = setTimeout(() => this.beginHold(), this.HOLD_DELAY);
+  },
+
+  handlePointerMove(e) {
+    const hold = this.hold;
+    if (!hold || e.pointerId !== hold.id || hold.active) return;
+    if (Math.hypot(e.clientX - hold.x, e.clientY - hold.y) <= this.HOLD_SLOP) return;
+    this.cancelHold();   // it moved — this is a drag or a swipe, not a hold
+  },
+
+  handlePointerUp(e) {
+    const hold = this.hold;
+    if (!hold || (e && e.pointerId !== hold.id)) return;
+    this.cancelHold();
+  },
+
+  beginHold() {
+    const hold = this.hold;
+    if (!hold) return;
+    hold.timer = null;
+    if (!this.canHold()) { this.hold = null; return; }
+    hold.active = true;
+    Player.setSpeedOverride(this.HOLD_SPEED);
+    // Reuse the gesture HUD: it is already centred, unclickable and dismissable.
+    this.showGestureHud('speed', `${this.HOLD_SPEED}×`);
+  },
+
+  /** End any press-and-hold (release, cancel, swipe, load, blur…). */
+  cancelHold() {
+    const hold = this.hold;
+    this.hold = null;
+    if (!hold) return;
+    clearTimeout(hold.timer);
+    if (!hold.active) return;
+    // Remember that a hold just ended so the click / tap that follows it does
+    // not also show or hide the control bar.
+    this.holdConsumedAt = performance.now();
+    Player.clearSpeedOverride();
+    this.hideGestureHud(120);
+  },
+
   handleTouchStart(e) {
     if (e.touches.length > 1) {
       this.ignoreTouchEnd = true;
       this.touchStart = null;
       this.touchGesture = null;
+      this.cancelHold();          // a pinch is not a hold
       clearTimeout(this.singleTapTimer);
       this.singleTapTimer = null;
       this.hideGestureHud(0);
@@ -2290,7 +2410,9 @@ const Gestures = {
         startTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
         startVolume: video.muted ? 0 : Player.volumeLevel,
       };
-      // A swipe must never fall through to a single/double-tap action.
+      // A swipe must never fall through to a single/double-tap action, and a
+      // press that turned into a swipe must not keep fast-forwarding.
+      this.cancelHold();
       clearTimeout(this.singleTapTimer);
       this.singleTapTimer = null;
       this.lastTap.time = 0;
@@ -2308,6 +2430,12 @@ const Gestures = {
       this.ignoreTouchEnd = false;
       this.touchStart = null;
       this.touchGesture = null;
+      this.lastTap.time = 0;
+      return;
+    }
+    // The finger that just came up was holding for 2× speed — that is not a tap.
+    if (now - this.holdConsumedAt < 400) {
+      this.touchStart = null;
       this.lastTap.time = 0;
       return;
     }
@@ -2376,7 +2504,9 @@ const Gestures = {
   showGestureHud(kind, label, direction = 'right') {
     const hud = $('#gestureHud');
     const use = hud.querySelector('use');
-    const symbol = kind === 'volume' ? '#i-vol-high' : direction === 'left' ? '#i-prev' : '#i-next';
+    const symbol = kind === 'volume' ? '#i-vol-high'
+      : kind === 'speed' ? '#i-speed'
+        : direction === 'left' ? '#i-prev' : '#i-next';
     use.setAttribute('href', symbol);
     $('#gestureHudLabel').textContent = label;
     hud.hidden = false;
@@ -2399,6 +2529,7 @@ const Gestures = {
   cancelTouchGesture() {
     this.touchStart = null;
     this.touchGesture = null;
+    this.cancelHold();
     this.ignoreTouchEnd = false;
     this.lastTap.time = 0;
     clearTimeout(this.singleTapTimer);
@@ -2413,7 +2544,7 @@ const Gestures = {
     // count as the player stage so a tap can reveal or hide the controls.
     return !!target.closest(
       'button, a, input, select, textarea, label, output, dialog, .controls, .card, .sheet, .popup, ' +
-      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, video[controls]'
+      '.sidebar, .item, .title-strip, .download-bar, .toast, .error-box, .up-next, video[controls]'
     );
   },
 
@@ -2444,8 +2575,10 @@ const Gestures = {
   /** Single tap toggles the control bar visibility. */
   handleSingleTap() {
     // A tap that dismissed an open popup (speed/quality menu) is consumed —
-    // it must not also toggle the control bar.
+    // it must not also toggle the control bar. Same for the release click/tap
+    // that ends a press-and-hold fast-forward.
     if (performance.now() - Menus.lastDismiss < 700) return;
+    if (performance.now() - this.holdConsumedAt < 700) return;
     const hidden = $('#controlsBar').classList.contains('is-hidden');
     Controls.setBarVisible(hidden);
     if (!hidden) clearTimeout(Controls.hideTimer);
@@ -2775,6 +2908,7 @@ const Playlist = {
     const entry = { id: item.id || uid(), addedAt: Date.now(), ...item };
     if (entry.kind === 'file' && entry.file) this.describeFile(entry);
     this.items.push(entry);
+    this._nextCache = null;
     this.save(); this.render();
     if (!silent) Toast.ok(`Added: ${entry.title}`);
     if (play) this.play(entry.id);
@@ -2795,6 +2929,7 @@ const Playlist = {
   /** Hook a picked file up to a saved placeholder (and make it playable). */
   attachFile(entry, file) {
     if (!entry || !file) return false;
+    this._nextCache = null;
     if (entry.objectUrl) { try { URL.revokeObjectURL(entry.objectUrl); } catch { /* ignore */ } }
     entry.file = file;
     entry.objectUrl = URL.createObjectURL(file);
@@ -2810,11 +2945,13 @@ const Playlist = {
     const [removed] = this.items.splice(idx, 1);
     Player.revoke(removed);
     if (this.currentId === id) this.currentId = null;
+    this._nextCache = null;
     this.save(); this.render();
     Toast.show(`Removed: ${removed.title}`, 'info', 1800);
   },
 
   move(id, delta) {
+    this._nextCache = null;
     const idx = this.indexOf(id);
     const next = idx + delta;
     if (idx === -1 || next < 0 || next >= this.items.length) return;
@@ -2824,6 +2961,7 @@ const Playlist = {
   },
 
   reorder(draggedId, targetId, before) {
+    this._nextCache = null;
     const from = this.indexOf(draggedId);
     let to = this.indexOf(targetId);
     if (from === -1 || to === -1 || from === to) return;
@@ -2845,13 +2983,14 @@ const Playlist = {
     const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
     const before = this.items.map((it) => it.id).join();
     this.items = [...this.items].sort(byTitle);
+    this._nextCache = null;
     this.save(); this.render();
     if (this.items.map((it) => it.id).join() === before) Toast.show('Already sorted A–Z', 'info', 1600, 'sort');
     else Toast.ok('Sorted A–Z');
     return true;
   },
 
-  clear() { this.items = []; this.save(); this.render(); },
+  clear() { this.items = []; this._nextCache = null; this.save(); this.render(); },
 
   /* ---------- navigation ---------- */
 
@@ -2866,18 +3005,36 @@ const Playlist = {
     Player.load(item, opts);
   },
 
-  /** Next / previous item honouring shuffle + loop modes. */
-  advance(direction = 1, { auto = false } = {}) {
-    if (!this.items.length) return;
+  /* Shuffle preview cache: { currentId, direction, index }. A shuffle pick is
+     random, so the index the up-next card advertises is remembered until the
+     auto-advance consumes it — otherwise the card would name one item and the
+     player would start another. */
+  _nextCache: null,
+
+  /**
+   * Index `advance(direction)` would land on, or -1 when there is nowhere to go
+   * (empty queue, or an automatic step past the last item with looping off).
+   *
+   * Pass `preview: true` to *remember* the pick instead of consuming it — that
+   * is how the up-next card asks "what is next?" without moving the playhead.
+   */
+  resolveNextIndex(direction = 1, { auto = false, preview = false } = {}) {
+    if (!this.items.length) return -1;
     const shuffle = !!Settings.get('shuffle');
     const loop = Settings.get('loopMode');
     const idx = this.currentId ? this.indexOf(this.currentId) : -1;
 
-    if (auto && idx === this.items.length - 1 && loop === 'off' && !shuffle) return; // stop at the end
+    if (auto && idx === this.items.length - 1 && loop === 'off' && !shuffle) return -1; // stop at the end
 
+    const cached = this._nextCache;
+    const reusable = !!cached && cached.currentId === this.currentId && cached.direction === direction &&
+      cached.index !== idx && cached.index >= 0 && cached.index < this.items.length;
     let nextIdx;
+    let usedCache = false;
+
     if (shuffle && this.items.length > 1) {
-      do { nextIdx = Math.floor(Math.random() * this.items.length); } while (nextIdx === idx);
+      if (reusable) { nextIdx = cached.index; usedCache = true; }
+      else do { nextIdx = Math.floor(Math.random() * this.items.length); } while (nextIdx === idx);
     } else {
       nextIdx = idx + direction;
       if (nextIdx >= this.items.length) nextIdx = 0;
@@ -2891,6 +3048,33 @@ const Playlist = {
       nextIdx = (nextIdx + (direction < 0 ? -1 : 1) + this.items.length) % this.items.length;
       if (nextIdx === idx) break;
     }
+    if (nextIdx < 0 || nextIdx >= this.items.length) return -1;
+
+    if (usedCache) {
+      if (!preview) this._nextCache = null;          // advertised item is playing
+    } else if (preview && shuffle && this.items.length > 1) {
+      this._nextCache = { currentId: this.currentId, direction, index: nextIdx };
+    }
+    return nextIdx;
+  },
+
+  /**
+   * The item the up-next card should offer, or null when there is nothing to
+   * offer (last item with looping off, nothing else playable, single-item queue).
+   * Never moves the playhead and never changes what is current.
+   */
+  previewNext() {
+    const i = this.resolveNextIndex(1, { auto: true, preview: true });
+    const next = i < 0 ? null : this.items[i];
+    if (!next) return null;
+    if (this.currentId && next.id === this.currentId) return null; // nothing "next" about it
+    return next;
+  },
+
+  /** Next / previous item honouring shuffle + loop modes. */
+  advance(direction = 1, { auto = false } = {}) {
+    const nextIdx = this.resolveNextIndex(direction, { auto });
+    if (nextIdx < 0) return;
     const next = this.items[nextIdx];
     if (!next) return;
     if (next.kind === 'file' && !next.objectUrl && next.file) {
@@ -2970,6 +3154,8 @@ const Playlist = {
   markCurrent(id) {
     if (this.currentId === id) return;
     this.currentId = id;
+    this._nextCache = null;   // a new "current" means a new "next"
+
     // Remembered so that reopening the app knows which title to offer back.
     this.save();
     $$('#playlistList .item').forEach((li) => li.classList.toggle('is-current', li.dataset.id === id));
@@ -3082,6 +3268,150 @@ const Playlist = {
       Toast.warn('None of those files match the saved entries — keep the same filenames to reconnect them', 6000, 'reconnect');
     }
     return linked;
+  },
+};
+
+/* =====================================================================
+ * 12b. UP NEXT — the card that offers the next item before this one ends
+ * ---------------------------------------------------------------------
+ * A small card in the bottom-right corner, shown `upNextSeconds` before the
+ * end of the current item. It names the item `Playlist.advance(1, { auto })`
+ * would move to, and offers two ways out: jump to it now, or dismiss the card
+ * and keep watching. Turning the setting off (or a lead time of 0) disables it.
+ * ===================================================================*/
+
+const UpNext = {
+  DEFAULT_SECONDS: 60,
+  card: null,
+  item: null,        // the item the card is advertising
+  forId: null,       // identity of the item the card belongs to
+  dismissed: false,  // the user pressed "Continue" for this item
+  visible: false,
+  _hideTimer: null,
+
+  _boundVideos: new WeakSet(),
+
+  init() {
+    this.card = $('#upNext');
+    if (!this.card) return;
+
+    $('#btnUpNextPlay').addEventListener('click', (e) => { e.stopPropagation(); this.playNext(); });
+    $('#btnUpNextContinue').addEventListener('click', (e) => { e.stopPropagation(); this.dismiss(); });
+    $('#btnUpNextDismiss')?.addEventListener('click', (e) => { e.stopPropagation(); this.dismiss(); });
+
+    this.bindVideo(Player.video);
+  },
+
+  /**
+   * Watch a media element. Called again when the player swaps in a fresh
+   * <video> (routing audio natively), so the card keeps following the clock.
+   */
+  bindVideo(video) {
+    if (!video || this._boundVideos.has(video)) return;
+    this._boundVideos.add(video);
+    const active = (fn) => () => { if (video === Player.video) fn(); };
+    // timeupdate carries the countdown; the rest cover seeks, pauses and edits.
+    ['timeupdate', 'play', 'pause', 'seeked', 'durationchange', 'ratechange']
+      .forEach((ev) => video.addEventListener(ev, active(() => this.sync())));
+    ['ended', 'emptied'].forEach((ev) => video.addEventListener(ev, active(() => this.reset())));
+  },
+
+  /** Items only have a stable id inside the queue — fall back to what they have. */
+  idOf(item) { return (item && (item.id || item.url || item.title)) || ''; },
+
+  /** Seconds before the end the card should appear; -1 means "never". */
+  lead() {
+    if (Settings.get('upNextEnabled') === false) return -1;
+    const raw = Number(Settings.get('upNextSeconds'));
+    if (!Number.isFinite(raw) || raw < 0) return this.DEFAULT_SECONDS;
+    return raw;
+  },
+
+  /** Forget everything about the current item (used on load / end / reset). */
+  reset() {
+    this.forId = null;
+    this.item = null;
+    this.dismissed = false;
+    this.hide();
+  },
+
+  /**
+   * Decide whether the card should be on screen. Cheap enough to run on every
+   * timeupdate: it is a subtraction and an index lookup, and it re-resolves the
+   * next item so the card follows edits to the queue.
+   */
+  sync() {
+    if (!this.card) return;
+    const lead = this.lead();
+    if (lead < 0) { this.reset(); return; }
+
+    const v = Player.video;
+    const current = Player.current;
+    // No media, no finite duration (live), or already finished → nothing to offer.
+    if (!current || v.ended || !Number.isFinite(v.duration) || v.duration <= 0) { this.reset(); return; }
+
+    const id = this.idOf(current);
+    if (id !== this.forId) {
+      this.forId = id;
+      this.item = null;
+      this.dismissed = false;   // a new item earns a fresh offer
+      this.hide();
+    }
+    if (this.dismissed) { this.hide(); return; }
+
+    const remaining = v.duration - v.currentTime;
+    if (remaining > lead) { this.hide(); return; }   // too early (or rewound back out)
+
+    const next = Playlist.previewNext();
+    if (!next) { this.hide(); return; }              // last item / nothing else playable
+    if (!this.item || this.item.id !== next.id) {
+      this.item = next;
+      const title = next.title || 'Untitled';
+      $('#upNextTitle').textContent = title;
+      $('#upNextTitle').title = title;
+    }
+    const secs = Math.max(0, Math.ceil(remaining));
+    $('#upNextCount').textContent = v.paused
+      ? `Paused · ${fmtTime(secs)} left`
+      : (secs > 0 ? `Starts in ${fmtTime(secs)}` : 'Starting now');
+    this.show();
+  },
+
+  show() {
+    if (this.visible) return;
+    this.visible = true;
+    clearTimeout(this._hideTimer);
+    this.card.hidden = false;
+    this.card.setAttribute('aria-hidden', 'false');
+    // Next frame, so the entry transition has a start state to animate from.
+    requestAnimationFrame(() => this.card.classList.add('show'));
+  },
+
+  hide() {
+    if (!this.visible) return;
+    this.visible = false;
+    this.card.classList.remove('show');
+    this.card.setAttribute('aria-hidden', 'true');
+    clearTimeout(this._hideTimer);
+    // Keep it in the DOM for the fade-out, then take it out of the layout.
+    this._hideTimer = setTimeout(() => { if (!this.visible) this.card.hidden = true; }, 240);
+  },
+
+  /** Jump straight to the advertised item. */
+  playNext() {
+    const next = this.item;
+    this.dismiss();
+    if (next) Playlist.play(next.id);
+    else Playlist.advance(1);
+  },
+
+  /**
+   * "Continue": drop the card and stay on this item. Playback runs to the end
+   * and then behaves exactly as it normally would (auto-advance, loop, stop).
+   */
+  dismiss() {
+    this.dismissed = true;
+    this.hide();
   },
 };
 
@@ -6501,6 +6831,33 @@ const Shell = {
         : 'Streams stop downloading ahead while paused', 'info', 2400);
     });
 
+    /* Up-next card: on/off + how many seconds before the end it appears */
+    const upNextOn = $('#optUpNext');
+    const upNextSecs = $('#upNextSeconds');
+    const upNextField = $('#upNextSecondsField');
+    const syncUpNextUi = () => {
+      const on = Settings.get('upNextEnabled') !== false;
+      const raw = Number(Settings.get('upNextSeconds'));
+      const secs = clamp(Number.isFinite(raw) && raw > 0 ? raw : UpNext.DEFAULT_SECONDS, 5, 180);
+      upNextOn.checked = on;
+      upNextSecs.value = String(secs);
+      $('#upNextSecondsOut').textContent = String(secs);
+      upNextField.classList.toggle('is-off', !on);
+      upNextSecs.disabled = !on;
+    };
+    upNextOn.addEventListener('change', (e) => {
+      Settings.set('upNextEnabled', e.target.checked);
+      syncUpNextUi();
+      UpNext.sync();
+      Toast.show(e.target.checked ? 'Up-next card is on' : 'Up-next card is off', 'info', 2000);
+    });
+    upNextSecs.addEventListener('input', () => { $('#upNextSecondsOut').textContent = upNextSecs.value; });
+    upNextSecs.addEventListener('change', () => {
+      Settings.set('upNextSeconds', Number(upNextSecs.value));
+      UpNext.sync();   // react immediately: widen the window and the card appears
+    });
+    syncUpNextUi();
+
     /* Install prompt (PWA) */
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
@@ -6686,6 +7043,7 @@ const App = {
     Gestures.init();
     Keyboard.init();
     Playlist.init();
+    UpNext.init();
     Sources.init();
     MovieSearch.init();
     AnimeSearch.init();
