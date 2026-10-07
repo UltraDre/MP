@@ -424,6 +424,81 @@ body.captions-on #btnCaptions { color: var(--accent-2); }
 .gesture-hud svg { width: 30px; height: 30px; }
 .gesture-hud span { font-size: .9rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 
+/* "Up next" card — bottom-right, offered just before the current item ends */
+.up-next {
+  position: absolute;
+  right: clamp(12px, 2vw, 24px);
+  bottom: calc(136px + env(safe-area-inset-bottom));
+  z-index: 9;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: min(340px, calc(100% - 24px));
+  padding: 13px 34px 13px 14px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: var(--radius);
+  background: rgba(10, 12, 22, .92);
+  color: #f3f4f6;
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  transform: translateY(12px) scale(.97);
+  transition: opacity .22s ease, transform .22s ease;
+}
+.up-next.show { opacity: 1; transform: none; }
+.up-next[hidden] { display: none !important; }
+
+.up-next-art {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: #b7c0ff;
+}
+.up-next-art svg { width: 20px; height: 20px; }
+.up-next-body { display: grid; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.up-next-label {
+  font-size: .66rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: #9297a2;
+}
+.up-next-title {
+  font-size: .92rem; font-weight: 650; line-height: 1.32; color: #f3f4f6;
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.up-next-count { font-size: .76rem; color: #b7bac2; font-variant-numeric: tabular-nums; }
+.up-next-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.up-next-actions .btn { padding: 7px 12px; font-size: .8rem; }
+.up-next-actions .btn svg { width: 15px; height: 15px; }
+.up-next-play { color: #fff; }
+.up-next-continue { color: #e8eaf0; background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .14); }
+.up-next-continue:hover { color: #fff; background: rgba(255, 255, 255, .15); }
+.up-next-close { position: absolute; top: 5px; right: 5px; color: #9297a2; padding: 5px; }
+.up-next-close:hover { color: #fff; background: rgba(255, 255, 255, .1); }
+
+@media (max-width: 640px) {
+  .up-next { left: 12px; right: 12px; width: auto; }
+}
+
+/* Settings: the up-next lead-time control in the shortcuts dialog */
+.up-next-seconds {
+  margin: 10px 0 0;
+  font-size: .82rem;
+  color: var(--text-dim);
+}
+.up-next-seconds > span {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  text-transform: none; letter-spacing: 0; font-weight: 500;
+}
+.up-next-seconds output { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+.up-next-seconds input[type="range"] { width: 100%; margin: 8px 0 0; accent-color: var(--accent-2); }
+.up-next-seconds.is-off { opacity: .45; pointer-events: none; }
+.up-next-hint { margin: 6px 0 0; font-size: .74rem; line-height: 1.45; color: var(--text-mute); }
+
 /* Error + empty states */
 .error-box, .empty-state {
   position: absolute; inset: auto 0 0 0; top: 0;
@@ -1308,6 +1383,9 @@ body {
   border-radius: 0;
   box-shadow: none;
   cursor: pointer;
+  /* A press-and-hold fast-forward must never turn into a text selection. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 .video { background: #000; }
 
@@ -1576,6 +1654,7 @@ textarea:focus { border-color: var(--accent); background: var(--surface); }
 
 @media (prefers-reduced-motion: reduce) {
   .app-header, .sidebar, .controls, .btn, .icon-btn, .item { transition: none !important; }
+  .up-next { transition: none !important; }
 }
 
 @media (display-mode: standalone) {

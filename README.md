@@ -48,6 +48,15 @@ No frameworks, no build step, no bundler — open it from any static server and 
   keeps filling ahead (up to the browser/SourceBuffer quota and the host's limits), and hls.js is nudged
   if it stops growing. The *Keep downloading ahead while paused* switch in the shortcut dialog can turn
   the background data usage off.
+- **Press-and-hold fast-forward**: hold the pointer down anywhere on the video and playback runs at **2×**
+  until you let go, then drops straight back to the speed you had chosen. A centred HUD shows the
+  temporary rate. It never overwrites your saved speed, and it is skipped while paused, on live streams
+  and when the press turns into a swipe.
+- **Up-next card**: `upNextSeconds` (60 s by default) before the current item ends, a card appears in the
+  bottom-right corner naming the next video or episode, with **Play next** and **Continue**. The card
+  counts down, follows seeks (rewind past the window and it disappears), and slides down into the corner
+  when the control bar is hidden. Turn it off — or set how early it appears — in the
+  *Keyboard shortcuts* dialog under **Up next**.
 - **Video quality** control for adaptive HLS (hls.js) and DASH streams: choose *Auto* or a rendition
   advertised by the manifest (such as 4K / 2160p, 1080p or 720p). It is shown only when the stream exposes
   quality levels. Single-file MP4/WebM and native-HLS playback do not provide a switchable rendition list.
@@ -332,6 +341,7 @@ auto-rotate enabled instead. This includes browsers that expose the API but reje
 | **Double-tap** the video area (mobile) | Play / pause (completely silent — no icon or text is shown) |
 | **Double-click** the video area (desktop) | Play / pause (completely silent — no icon or text is shown) |
 | **Single tap / click** the video area | Show / hide the control bar |
+| **Press and hold** anywhere on the video | Play at **2×** until you release, then return to your speed (a HUD shows the rate) |
 | Optional (off by default, see *Keyboard shortcuts* dialog) | Double-tap the left/right third to seek −10 s / +10 s |
 | Drag a file over the player | Shows the drop overlay; drop to add |
 
@@ -343,6 +353,11 @@ Notes on the implementation:
   **0.1 seconds per pixel**, while vertical movement changes volume relative to the player height.
   A small on-video HUD shows the current seek offset or volume; swipes never trigger the tap actions.
 - Desktop uses the native `dblclick` event.
+- Press-and-hold is driven by **pointer events**, so the same code path serves mouse, touch and pen. The
+  press must stay within 14 px for **320 ms** before 2× engages; moving further cancels it so a swipe can
+  still seek or change volume, a second finger cancels it so pinch-zoom is unaffected, and the rate is
+  always restored on release, on `blur`, or when the item changes. The release click is also swallowed, so
+  ending a hold never shows or hides the control bar.
 - Every handler checks `event.target` first: taps on the control bar, buttons, sliders, playlist,
   URL input, dialogs or any `.card`/`.item` are **never** treated as gestures.
 - Page zoom is disabled everywhere (`maximum-scale=1, user-scalable=no` viewport, touch-action
@@ -375,6 +390,15 @@ Press <kbd>?</kbd> inside the app for this list.
 
 Shortcuts are ignored while you are typing in a field, and <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> combinations
 are left to the browser.
+
+That dialog is also where the opt-in playback settings live, at the bottom:
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| Double-tap the left / right third to seek ∓10 s | off | Replaces the double-tap play/pause in the outer thirds |
+| Keep downloading ahead while paused | on | Streams keep filling the buffer while paused |
+| Show an “up next” card before the current video ends | on | The bottom-right card described below |
+| Show the card *N* seconds before the end | 60 s | Slider, 5–180 s; greyed out while the card is off |
 
 ---
 
@@ -627,6 +651,7 @@ node tests/service-worker.test.mjs    # 50 checks: caching, HLS/DASH parsing, ra
 npm install --no-save jsdom           # only for the UI test
 node tests/ui-smoke.test.mjs          # boots the real DOM and drives keyboard/gestures/playlist/sorting/movie-search/page-scan/subtitle-search
 node tests/persistence.test.mjs       # close/reopen round trips: queue, order, highlight, resume pop-up, saved local files, save-on-close
+node tests/up-next.test.mjs           # press-and-hold 2x speed + the up-next card, its countdown, its settings and shuffle honesty
 ```
 
 - `static-checks.mjs` cross-references every `$('#id')` in `script.js` with `index.html` — the fastest
@@ -641,6 +666,13 @@ node tests/persistence.test.mjs       # close/reopen round trips: queue, order, 
   OpenSubtitles/Stremio backend, language filters and one-click loading), resume-position persistence
   across item switches, the alphabetical playlist sort and the paused forward-buffer policy (through a fake
   hls.js instance) plus localStorage persistence.
+- `up-next.test.mjs` boots the app in jsdom and drives both new features end to end: the hold gesture
+  (quick press vs. hold, drag cancels, paused/live are ignored, a custom speed survives the hold, loading
+  another item releases the override, the release click does not toggle the controls) and the up-next card
+  (appears inside the lead window, names the right item, counts down, hides on rewind, **Continue** keeps
+  it away for the rest of the item, **Play next** loads the advertised item, the on/off switch and the
+  5–180 s lead-time slider, no card for a one-item queue or the last item with looping off, and — with
+  shuffle on — that the item the card names is the one that actually plays).
 - `persistence.test.mjs` boots the app *on top of* a `localStorage` state from a previous session and checks
   what comes back (queue, saved order, highlighted last title, resume position, the “continue where you
   left off” card) and that `pagehide` / hiding the tab flushes debounced writes instead of losing them.

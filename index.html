@@ -145,6 +145,25 @@
           <span id="gestureHudLabel"></span>
         </div>
 
+        <!-- "Up next" card — offered a little before the current item ends -->
+        <div class="up-next" id="upNext" role="region" aria-label="Up next" hidden aria-hidden="true">
+          <span class="up-next-art" aria-hidden="true"><svg aria-hidden="true"><use href="#i-next"/></svg></span>
+          <div class="up-next-body">
+            <p class="up-next-label">Up next</p>
+            <p class="up-next-title" id="upNextTitle">—</p>
+            <p class="up-next-count" id="upNextCount">Starts in 0:00</p>
+            <div class="up-next-actions">
+              <button class="btn btn-primary up-next-play" id="btnUpNextPlay" type="button" title="Skip to the next item now">
+                <svg aria-hidden="true"><use href="#i-play"/></svg><span>Play next</span>
+              </button>
+              <button class="btn btn-ghost up-next-continue" id="btnUpNextContinue" type="button" title="Keep watching this item">Continue</button>
+            </div>
+          </div>
+          <button class="icon-btn sm up-next-close" id="btnUpNextDismiss" type="button" aria-label="Dismiss the up next card" title="Dismiss">
+            <svg aria-hidden="true"><use href="#i-close"/></svg>
+          </button>
+        </div>
+
         <!-- Error / empty states -->
         <div class="error-box" id="errorBox" hidden role="alert">
           <svg aria-hidden="true"><use href="#i-warn"/></svg>
@@ -588,6 +607,7 @@
     </div>
     <h3>Gestures</h3>
     <ul class="bullet">
+      <li><strong>Hold</strong> anywhere on the video → 2× speed until you let go</li>
       <li><strong>Double-tap / double-click</strong> the video area → play / pause</li>
       <li><strong>Single tap / click</strong> the video area → show / hide the control bar</li>
       <li>Controls, playlist, sliders and inputs are excluded from gestures</li>
@@ -600,6 +620,18 @@
       <input type="checkbox" id="optPrebuffer" />
       <span>Keep downloading ahead while paused (uses mobile/desktop data in the background)</span>
     </label>
+
+    <h3>Up next</h3>
+    <label class="switch-row" style="margin-top:10px">
+      <input type="checkbox" id="optUpNext" />
+      <span>Show an “up next” card before the current video ends</span>
+    </label>
+    <label class="field up-next-seconds" id="upNextSecondsField">
+      <span>Show the card <output id="upNextSecondsOut">60</output> seconds before the end</span>
+      <input type="range" id="upNextSeconds" min="5" max="180" step="5" value="60"
+             aria-label="Seconds before the end to show the up-next card" />
+    </label>
+    <p class="up-next-hint">The card names the next video or episode and lets you jump to it now or keep watching. It needs at least two playable items in the playlist.</p>
   </div>
 </dialog>
 
